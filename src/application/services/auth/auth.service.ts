@@ -1,275 +1,302 @@
-// src/modules/auth/auth.service.ts
+// src/application/services/auth/auth.service.ts
 
-import { Injectable, BadRequestException, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  InternalServerErrorException,
+} from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
-import { lastValueFrom } from 'rxjs';
+import { firstValueFrom } from 'rxjs';
 import { AxiosResponse } from 'axios';
+import { JiraCredentialRepository } from 'src/infra/repositories/jira/jira-credential.repository';
+
+interface TokenResponse {
+  access_token: string;
+  refresh_token: string;
+  expires_in: number; // em segundos
+  token_type: string;
+  scope: string;
+}
+
+interface AccessibleResource {
+  id: string; // cloudId
+  // outros campos retornados por accessible-resources (name, url, scopes) não usados aqui
+}
 
 @Injectable()
 export class AuthService {
-  private readonly logger = new Logger(AuthService.name);
+  // URLs fixas para os endpoints de OAuth do Jira
+  private readonly jiraAuthBaseUrl = 'https://auth.atlassian.com/oauth/token';
+  private readonly jiraAccessibleResourcesUrl =
+    'https://api.atlassian.com/oauth/token/accessible-resources';
 
   constructor(
-    // 1) Injetamos HttpService para poder fazer HTTP requests (Axios)
     private readonly httpService: HttpService,
+    private readonly jiraCredentialRepo: JiraCredentialRepository, // repositório para persistir tokens
   ) {}
 
   /**
-   * Gera um state aleatório (16 bytes → hex) e o armazena na sessão.
-   * Usaremos esse state para validar o callback e impedir CSRF.
-   */
-  createState(session: Record<string, any>): string {
-    const crypto = require('crypto');
-    const state = crypto.randomBytes(16).toString('hex');
-    session.jiraOAuthState = state;
-    this.logger.debug(`State gerado e salvo na sessão: ${state}`);
-    return state;
-  }
-
-  /**
-   * Monta a URL de autorização do Jira (OAuth 2.0 3LO) usando variáveis de ambiente:
-   *   - JIRA_CLIENT_ID
-   *   - JIRA_REDIRECT_URI  (deve ser “http://localhost:3000/oauth/callback”)
+   * Constrói a URL de autorização do Jira (3LO).
+   * Lê CLIENT_ID e REDIRECT_URI diretamente de process.env.
    *
-   * Parâmetros fixos:
-   *   - audience=api.atlassian.com   (obrigatório para Jira Cloud)
-   *   - scope=read:jira-work         (escopo mínimo requerido para ler issues)
-   *   - response_type=code           (fluxo Authorization Code)
-   *   - prompt=consent               (força a tela de consentimento)
-   *
-   * @param state Valor anti-CSRF gerado anteriormente
-   * @returns URL completa para redirecionar o navegador ao Jira Cloud
+   * @param state Valor aleatório para proteger contra CSRF.
+   * @returns URL completa para redirecionamento ao Jira.
    */
   buildAuthorizationUrl(state: string): string {
-    // 2) Lê do process.env
+    // 1) Lê valores do environment
     const clientId = process.env.JIRA_CLIENT_ID;
     const redirectUri = process.env.JIRA_REDIRECT_URI;
 
-    // 3) Se faltar algo, lançamos erro para avisar que o .env está incompleto
+    // 2) Validações básicas: se faltar alguma variável, lança exceção
     if (!clientId || !redirectUri) {
       throw new BadRequestException(
-        'As variáveis JIRA_CLIENT_ID e JIRA_REDIRECT_URI devem estar definidas no .env',
+        'As variáveis de ambiente JIRA_CLIENT_ID e/ou JIRA_REDIRECT_URI não estão definidas.',
       );
     }
 
-    // 4) Base URL de autorização (sempre https://auth.atlassian.com/authorize para Jira Cloud)
-    const authBase = 'https://auth.atlassian.com/authorize';
-
-    // 5) Montamos os query params com URLSearchParams para escapar adequadamente
+    // 3) Monta a query string com todos os parâmetros necessários:
+    //    - audience: api.atlassian.com (obrigatório para OAuth Atlassian)
+    //    - client_id: seu clientId cadastrado no Jira
+    //    - scope: “read:jira-work offline_access” para leitura de issues e uso de refresh token
+    //    - redirect_uri: para onde o Jira irá retornar o código
+    //    - state: valor de proteção CSRF
+    //    - response_type=code: indica que queremos o authorization code
+    //    - prompt=consent: força exibir tela de consentimento, garantindo refresh_token
     const params = new URLSearchParams({
-      audience: 'api.atlassian.com', // obrigatório para Jira Cloud
-      client_id: clientId, // do process.env
-      scope: 'read:jira-work offline_access', // ⬅ adicionamos offline_access
-      redirect_uri: redirectUri, // do process.env (http://localhost:3000/oauth/callback)
-      state, // state anti-CSRF gerado antes
-      response_type: 'code', // fluxo Authorization Code
-      prompt: 'consent', // força a tela de consentimento
+      audience: 'api.atlassian.com',
+      client_id: clientId,
+      scope: 'read:jira-work offline_access',
+      redirect_uri: redirectUri,
+      state,
+      response_type: 'code',
+      prompt: 'consent',
     });
 
-    // 6) Retornamos a URL completa que deve ser usada pelo navegador
-    return `${authBase}?${params.toString()}`;
+    // 4) Retorna a URL completa de autorização
+    return `https://auth.atlassian.com/authorize?${params.toString()}`;
   }
 
   /**
-   * Lida com o callback do Jira (chamado em /oauth/callback?code=…&state=…).
+   * Recebe o authorization code do Jira e faz trocas de token.
+   * Em seguida obtém o cloudId e persiste tudo no banco (SQLite) através do Repositório.
    *
-   * Passos:
-   *   1) Valida se o state recebido coincide com session.jiraOAuthState.
-   *   2) Troca o authorization code por access_token e refresh_token:
-   *        POST https://auth.atlassian.com/oauth/token
-   *        Body JSON: {
-   *          grant_type:    'authorization_code',
-   *          client_id:     process.env.JIRA_CLIENT_ID,
-   *          client_secret: process.env.JIRA_CLIENT_SECRET,
-   *          code,
-   *          redirect_uri:  process.env.JIRA_REDIRECT_URI
-   *        }
-   *      → Resposta: { access_token, refresh_token, expires_in, ... }
-   *   3) Armazena access_token e refresh_token em session.
-   *   4) Usa access_token para chamar:
-   *        GET https://api.atlassian.com/oauth/token/accessible-resources
-   *        Headers: { Authorization: `Bearer ${access_token}` }
-   *      → Resposta: array de recursos (quase sempre pegamos o primeiro item e usamos resources[0].id como cloudId).
-   *   5) Armazena o cloudId em session.jiraCloudId para futuras chamadas.
+   * @param code    Código de autorização retornado pelo Jira.
+   * @param session Sessão do usuário (para gravar tokens temporários, se necessário).
+   * @param userId  Identificador do usuário/instalação (pode ser "default").
    *
-   * Variáveis obrigatórias em .env:
-   *   - JIRA_CLIENT_ID
-   *   - JIRA_CLIENT_SECRET
-   *   - JIRA_REDIRECT_URI  (http://localhost:3000/oauth/callback)
-   *
-   * @param code    – valor de “code” passado pelo Jira na query param
-   * @param session – objeto de sessão (req.session) para armazenar tokens e cloudId
+   * @returns Dados básicos: accessToken, refreshToken, cloudId e expiresIn (em segundos).
    */
   async handleCallback(
     code: string,
     session: Record<string, any>,
-  ): Promise<void> {
+    userId: string,
+  ): Promise<{
+    accessToken: string;
+    refreshToken: string;
+    cloudId: string;
+    expiresIn: number;
+  }> {
+    // 1) Obter diretamente do env as variáveis obrigatórias para trocar o code por token
     const clientId = process.env.JIRA_CLIENT_ID;
     const clientSecret = process.env.JIRA_CLIENT_SECRET;
     const redirectUri = process.env.JIRA_REDIRECT_URI;
 
+    // 2) Verificar se todas as variáveis existem, senão erro
     if (!clientId || !clientSecret || !redirectUri) {
       throw new BadRequestException(
-        'JIRA_CLIENT_ID, JIRA_CLIENT_SECRET e JIRA_REDIRECT_URI devem estar definidos no .env',
+        'As variáveis JIRA_CLIENT_ID, JIRA_CLIENT_SECRET e/ou JIRA_REDIRECT_URI não estão definidas.',
       );
     }
 
-    // ──────────── 1) TROCAR 'code' POR 'access_token' + 'refresh_token' ────────────
+    // 3) Montar payload para a requisição de troca de authorization code por tokens
+    const tokenPayload = {
+      grant_type: 'authorization_code',
+      client_id: clientId,
+      client_secret: clientSecret,
+      code,
+      redirect_uri: redirectUri,
+    };
+
+    // 4) Fazer POST no endpoint https://auth.atlassian.com/oauth/token
+    let tokenResponse: AxiosResponse<TokenResponse>;
     try {
-      // 1.1) Disparar a requisição POST para o endpoint de tokens
-      const tokenResponse: AxiosResponse<any> = await lastValueFrom(
-        this.httpService.post(
-          'https://auth.atlassian.com/oauth/token',
-          {
-            grant_type: 'authorization_code',
-            client_id: clientId,
-            client_secret: clientSecret,
-            code,
-            redirect_uri: redirectUri,
-          },
+      tokenResponse = await firstValueFrom(
+        this.httpService.post<TokenResponse>(
+          this.jiraAuthBaseUrl,
+          tokenPayload,
           {
             headers: {
               'Content-Type': 'application/json',
-              Accept: 'application/json', // garante resposta em JSON
-            },
-          },
-        ),
-      );
-
-      // 1.2) **Log raw** da resposta – vamos ver exatamente o que o Jira retornou
-      this.logger.debug(
-        'Resposta completa do token endpoint:',
-        JSON.stringify(tokenResponse.data),
-      );
-
-      // 1.3) Tenta extrair os tokens do body
-      const accessToken = tokenResponse.data?.access_token;
-      const refreshToken = tokenResponse.data?.refresh_token;
-
-      // 1.4) Se qualquer um estiver faltando, lança erro detalhado
-      if (!accessToken || !refreshToken) {
-        // Antes de lançar, incluímos o próprio JSON devolvido na mensagem de erro
-        const rawBody = JSON.stringify(tokenResponse.data);
-        throw new Error(
-          `Não retornou access_token ou refresh_token. Body recebido: ${rawBody}`,
-        );
-      }
-
-      // 1.5) Se chegamos aqui, salvamos os tokens na sessão
-      session.jiraAccessToken = accessToken;
-      session.jiraRefreshToken = refreshToken;
-      this.logger.debug('Access e refresh tokens armazenados na sessão.');
-    } catch (err) {
-      // 1.6) Se cair aqui, significa que algo deu errado na requisição/token parsing
-      //      Vamos logar para facilitar diagnóstico e depois jogar a exceção
-      const errData = (err as any).response?.data || (err as any).message;
-      this.logger.error(
-        'Falha na requisição ao endpoint de token do Jira:',
-        errData,
-      );
-      // Repassa a mensagem (que já contém o rawBody se falhou no parsing)
-      throw new BadRequestException(
-        'Falha na requisição ao endpoint de token do Jira: ' + errData,
-      );
-    }
-
-    // ──────────── 2) OBTER O cloudId VIA "accessible-resources" ────────────
-    try {
-      const accessToken = session.jiraAccessToken;
-
-      const resourcesResponse: AxiosResponse<any> = await lastValueFrom(
-        this.httpService.get(
-          'https://api.atlassian.com/oauth/token/accessible-resources',
-          {
-            headers: {
-              Authorization: `Bearer ${accessToken}`,
               Accept: 'application/json',
             },
           },
         ),
       );
-
-      // 2.1) Log raw do array de recursos (para confirmar que veio o JSON certo)
-      this.logger.debug(
-        'Resposta completa de accessible-resources:',
-        JSON.stringify(resourcesResponse.data),
-      );
-
-      const resources = resourcesResponse.data as any[];
-      if (!resources || resources.length === 0) {
-        throw new Error('Nenhum recurso acessível retornado pelo Jira.');
-      }
-
-      const cloudId = resources[0].id;
-      session.jiraCloudId = cloudId;
-      this.logger.debug(`cloudId armazenado na sessão: ${cloudId}`);
-    } catch (err) {
-      const errData = (err as any).response?.data || (err as any).message;
-      this.logger.error('Falha ao buscar accessible-resources:', errData);
-      throw new BadRequestException(
-        'Falha na requisição de accessible-resources: ' + errData,
-      );
-    }
-  }
-
-  /**
-   * Opcional: Atualiza o access_token usando o refresh_token guardado na sessão.
-   *
-   * Fluxo:
-   *   POST https://auth.atlassian.com/oauth/token
-   *   Body JSON:
-   *     {
-   *       grant_type:    'refresh_token',
-   *       client_id:     process.env.JIRA_CLIENT_ID,
-   *       client_secret: process.env.JIRA_CLIENT_SECRET,
-   *       refresh_token: session.jiraRefreshToken
-   *     }
-   *  → Retorna { access_token, refresh_token, ... }
-   *  Substitui os valores na sessão.
-   *
-   * Em produção, você guardaria refreshToken em banco e não em sessão.
-   */
-  async refreshAccessToken(session: Record<string, any>): Promise<void> {
-    const clientId = process.env.JIRA_CLIENT_ID;
-    const clientSecret = process.env.JIRA_CLIENT_SECRET;
-    const oldRefresh = session.jiraRefreshToken;
-
-    if (!clientId || !clientSecret || !oldRefresh) {
-      throw new BadRequestException(
-        'JIRA_CLIENT_ID, JIRA_CLIENT_SECRET e JIRA_REFRESH_TOKEN precisam estar definidos no .env / sessão',
+    } catch (error) {
+      // Caso a requisição falhe (rede, 4xx/5xx, etc.), lança erro interno
+      throw new InternalServerErrorException(
+        `Falha na requisição ao endpoint de token do Jira: ${error.message}`,
       );
     }
 
+    const tokenData = tokenResponse.data;
+    // 5) Validar resposta: deve conter access_token e refresh_token
+    if (!tokenData.access_token || !tokenData.refresh_token) {
+      throw new BadRequestException(
+        `Não retornou access_token ou refresh_token. Body recebido: ${JSON.stringify(
+          tokenData,
+        )}`,
+      );
+    }
+
+    // 6) Agora, usando o access_token, buscar o cloudId
+    let resourcesResponse: AxiosResponse<AccessibleResource[]>;
     try {
-      const response: AxiosResponse<any> = await lastValueFrom(
-        this.httpService.post(
-          'https://auth.atlassian.com/oauth/token',
+      resourcesResponse = await firstValueFrom(
+        this.httpService.get<AccessibleResource[]>(
+          this.jiraAccessibleResourcesUrl,
           {
-            grant_type: 'refresh_token',
-            client_id: clientId,
-            client_secret: clientSecret,
-            refresh_token: oldRefresh,
-          },
-          {
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              Authorization: `Bearer ${tokenData.access_token}`,
+              Accept: 'application/json',
+            },
           },
         ),
       );
-
-      const newAccessToken = response.data?.access_token;
-      const newRefreshToken = response.data?.refresh_token;
-
-      if (!newAccessToken || !newRefreshToken) {
-        throw new Error('Não retornou novos tokens no refresh.');
-      }
-
-      session.jiraAccessToken = newAccessToken;
-      session.jiraRefreshToken = newRefreshToken;
-      this.logger.debug('Tokens atualizados na sessão via refresh.');
-    } catch (err) {
-      const errorData = (err as any).response?.data || (err as any).message;
-      this.logger.error('Erro ao tentar refresh do access_token:', errorData);
-      throw new BadRequestException('Falha no refresh token: ' + errorData);
+    } catch (error) {
+      throw new InternalServerErrorException(
+        `Falha ao buscar accessible-resources no Jira: ${error.message}`,
+      );
     }
+
+    const resources = resourcesResponse.data;
+    if (!resources || resources.length === 0) {
+      throw new BadRequestException(
+        'Nenhum recurso acessível retornado pelo Jira. Verifique suas permissões.',
+      );
+    }
+    const cloudId = resources[0].id;
+
+    // 7) Calcular a data de expiração do accessToken (expires_in está em segundos)
+    const expiresIn = tokenData.expires_in; // ex.: 3600 = 1h
+    const expiresAt = new Date(Date.now() + expiresIn * 1000);
+
+    // 8) Persistir no SQLite usando o JiraCredentialRepository
+    await this.jiraCredentialRepo.upsertCredentials({
+      userId,
+      cloudId,
+      accessToken: tokenData.access_token,
+      refreshToken: tokenData.refresh_token,
+      expiresAt,
+    });
+
+    // 9) (Opcional) Atualizar a sessão para uso imediato nesta requisição
+    session.jiraAccessToken = tokenData.access_token;
+    session.jiraRefreshToken = tokenData.refresh_token;
+    session.jiraCloudId = cloudId;
+    session.jiraExpiresAt = expiresAt;
+
+    // 10) Retornar apenas o mínimo necessário (não exponha tokens ao front em produção)
+    return {
+      accessToken: tokenData.access_token,
+      refreshToken: tokenData.refresh_token,
+      cloudId,
+      expiresIn,
+    };
+  }
+
+  /**
+   * Renova o accessToken usando o refreshToken já armazenado no banco.
+   *
+   * @param userId  Identificador do usuário/instalação.
+   * @param session (Opcional) Sessão do usuário, caso queira atualizar também.
+   *
+   * @returns Novo accessToken, novo refreshToken e expiresIn (em segundos).
+   */
+  async refreshAccessToken(
+    userId: string,
+    session?: Record<string, any>,
+  ): Promise<{
+    newAccessToken: string;
+    newRefreshToken: string;
+    newExpiresIn: number;
+  }> {
+    // 1) Buscar credencial existente no banco
+    const existingCred = await this.jiraCredentialRepo.findByUserId(userId);
+    if (!existingCred) {
+      throw new BadRequestException(
+        'Nenhuma credencial encontrada para este usuário. Talvez o fluxo de OAuth não tenha sido concluído.',
+      );
+    }
+
+    // 2) Lê clientId e clientSecret diretamente de process.env
+    const clientId = process.env.JIRA_CLIENT_ID;
+    const clientSecret = process.env.JIRA_CLIENT_SECRET;
+
+    if (!clientId || !clientSecret) {
+      throw new BadRequestException(
+        'As variáveis JIRA_CLIENT_ID e/ou JIRA_CLIENT_SECRET não estão definidas.',
+      );
+    }
+
+    // 3) Monta payload para refresh token grant
+    const payload = {
+      grant_type: 'refresh_token',
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: existingCred.refreshToken,
+    };
+
+    // 4) Faz POST para renovar
+    let tokenResp: AxiosResponse<TokenResponse>;
+    try {
+      tokenResp = await firstValueFrom(
+        this.httpService.post<TokenResponse>(this.jiraAuthBaseUrl, payload, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+        }),
+      );
+    } catch (error) {
+      throw new InternalServerErrorException(
+        `Falha ao renovar token: ${error.message}`,
+      );
+    }
+
+    const newData = tokenResp.data;
+    // 5) Validar presença de access_token e refresh_token
+    if (!newData.access_token || !newData.refresh_token) {
+      throw new BadRequestException(
+        `Resposta de refresh sem access_token/refresh_token. Body: ${JSON.stringify(
+          newData,
+        )}`,
+      );
+    }
+
+    // 6) Calcular nova data de expiração
+    const newExpiresIn = newData.expires_in;
+    const newExpiresAt = new Date(Date.now() + newExpiresIn * 1000);
+
+    // 7) Atualizar somente os campos necessários no banco
+    await this.jiraCredentialRepo.updateAccessToken({
+      userId,
+      newAccessToken: newData.access_token,
+      newExpiresAt,
+      newRefreshToken: newData.refresh_token,
+    });
+
+    // 8) (Opcional) Atualizar a sessão se enviada como parâmetro
+    if (session) {
+      session.jiraAccessToken = newData.access_token;
+      session.jiraRefreshToken = newData.refresh_token;
+      session.jiraExpiresAt = newExpiresAt;
+    }
+
+    return {
+      newAccessToken: newData.access_token,
+      newRefreshToken: newData.refresh_token,
+      newExpiresIn,
+    };
   }
 }

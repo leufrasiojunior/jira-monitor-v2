@@ -1,18 +1,26 @@
 // src/modules/auth/auth.module.ts
 
 import { Module } from '@nestjs/common';
-import { HttpModule } from '@nestjs/axios';
-import { JiraAuthController } from 'src/adapters/auth/jira-auth.controller';
-import { OauthCallbackController } from 'src/adapters/auth/oauth-callback.controller';
-import { AuthService } from 'src/application/services/auth/auth.service';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { HttpModule } from '@nestjs/axios'; // <-- importa o HttpModule aqui
+
+import { AuthService } from '../../application/services/auth/auth.service';
+import { JiraAuthController } from '../../adapters/controllers/auth/jira-auth.controller';
+import { OauthCallbackController } from '../../adapters/controllers/auth/oauth-callback.controller';
+
+import { JiraCredentialEntity } from '../../domain/entities/jira-credential.entity';
+import { JiraCredentialRepository } from '../../infra/repositories/jira/jira-credential.repository';
 
 @Module({
-  // Precisamos do HttpModule para que o Nest injete HttpService no AuthService
-  imports: [HttpModule],
-  controllers: [
-    JiraAuthController, // mapeia  GET /jira/auth/install
-    OauthCallbackController, // mapeia  GET /oauth/callback
+  imports: [
+    // 1) Garante que HttpService seja fornecido no contexto deste módulo
+    HttpModule,
+
+    // 2) Registra a entidade para que o Repository<JiraCredentialEntity> exista
+    TypeOrmModule.forFeature([JiraCredentialEntity]),
   ],
-  providers: [AuthService],
+  controllers: [JiraAuthController, OauthCallbackController],
+  providers: [AuthService, JiraCredentialRepository],
+  exports: [AuthService, JiraCredentialRepository],
 })
 export class AuthModule {}
