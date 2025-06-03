@@ -88,8 +88,8 @@ export class ProcessIssuesUseCase {
     // 5) Retorna o total de issues após filtro, a lista mapeada e os contadores por status
     return {
       total: mappedIssues.length,
-      issues: mappedIssues,
       statusCounts,
+      issues: mappedIssues,
     };
   }
 }
