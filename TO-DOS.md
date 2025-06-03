@@ -224,7 +224,7 @@ Implemente aos poucos, validando cada parte (por exemplo, primeiro refatore para
 
 Documentar o fluxo e endpoints no README ou Swagger:
 
-Adicionar anotações Swagger (via @nestjs/swagger) para documentar /jira/auth/install, /oauth/callback e /jira/monitor/fetch.
+Adicionar anotações Swagger (via @nestjs/swagger) para documentar /jira/auth/install, /oauth/callback e /jira/monitor/fetch. (ok)
 
 Explicar variáveis de ambiente necessárias e exemplos de uso.
 

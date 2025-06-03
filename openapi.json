@@ -63,7 +63,7 @@
     },
     "/jira/monitor/fetch": {
       "get": {
-        "description": "Executa imediatamente a consulta ao Jira para o projeto OMNIJS, filtra, agrupa e retorna resumo das issues.",
+        "description": "Consulta o Jira usando o JQL informado (ou o padrão do projeto OMNIJS), filtra, agrupa e retorna resumo das issues.",
         "operationId": "JiraMonitorController_fetchIssues",
         "parameters": [
           {
@@ -71,6 +71,15 @@
             "required": false,
             "in": "query",
             "description": "Identificador das credenciais (ex.: \"default\")",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "jql",
+            "required": false,
+            "in": "query",
+            "description": "Consulta JQL completa. Se omitido, usa: project = \"OMNIJS\" ORDER BY created DESC",
             "schema": {
               "type": "string"
             }
@@ -88,13 +97,13 @@
             }
           },
           "400": {
-            "description": "Parâmetro inválido (ex.: userId não existe)"
+            "description": "Parâmetro inválido (ex.: JQL malformado)"
           },
           "500": {
             "description": "Erro interno ao processar a requisição"
           }
         },
-        "summary": "Buscar e processar issues do Jira",
+        "summary": "Buscar e processar issues do Jira com JQL dinâmico",
         "tags": [
           "Jira Monitor"
         ]

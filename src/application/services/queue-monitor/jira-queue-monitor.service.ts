@@ -24,7 +24,9 @@ export class JiraQueueMonitorService {
    * Buffer de 1 minuto antes da expiração real do token:
    * se faltar menos de 1 minuto para expirar, já renovamos antecipadamente.
    */
-  private readonly REFRESH_BUFFER_MS = 60 * 1000; // 1 minuto em milissegundos
+  private readonly REFRESH_BUFFER_MS = 60 * 1000; // 1 minuto
+  private readonly DEFAULT_JQL = 'project = "OMNIJS" ORDER BY created DESC';
+  s;
 
   /**
    * Construímos a URL completa de consulta usando:
@@ -32,8 +34,6 @@ export class JiraQueueMonitorService {
    *   - rota REST /rest/api/3/search
    *   - JQL: project = "OMNIJS" ORDER BY created DESC
    */
-  private readonly JQL_QUERY =
-    '?jql=project%20%3D%20"OMNIJS"%20ORDER%20BY%20created%20DESC';
 
   constructor(
     private readonly httpService: HttpService,
@@ -69,7 +69,7 @@ export class JiraQueueMonitorService {
    * @param userId Identificador das credenciais (ex.: "default")
    * @returns Resultado do ProcessIssuesUseCase (ou lança exceção em caso de erro).
    */
-  async fetchAndProcessIssues(userId: string): Promise<any> {
+  async fetchAndProcessIssues(userId: string, jql?: string): Promise<any> {
     // 1) Recuperar credencial do banco para este userId
     const cred = await this.jiraCredRepo.findByUserId(userId);
     if (!cred) {
@@ -94,15 +94,12 @@ export class JiraQueueMonitorService {
       // (O próprio AuthService já atualizou o SQLite via repositório)
     }
 
-    // 3) Montar a URL completa de consulta ao Jira:
-    //    ex: https://brandlive-summa.atlassian.net/rest/api/3/search?jql=...
-    const cloudId = cred.cloudId;
-    // if (!baseUrl) {
-    //   throw new InternalServerErrorException(
-    //     'Variável de ambiente JIRA_BASE_URL não definida.',
-    //   );
-    // }
-    const apiUrl = `https://api.atlassian.com/ex/jira/${cred.cloudId}/rest/api/3/search${this.JQL_QUERY}`;
+    // 3) Decide qual JQL usar: recebido ou padrão
+    const jqlToUse = jql || this.DEFAULT_JQL;
+    const encodedJql = encodeURIComponent(jqlToUse);
+
+    // 4) Monta a URL final de consulta ao Jira
+    const apiUrl = `https://api.atlassian.com/ex/jira/${cred.cloudId}/rest/api/3/search?jql=${encodedJql}`;
 
     // 4) Executar a requisição GET para a API Jira
     let response;
