@@ -6,6 +6,7 @@ import {
   InternalServerErrorException,
   Logger, // ▶️ import Logger
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import { AxiosResponse } from 'axios';
@@ -36,6 +37,7 @@ export class AuthService {
   constructor(
     private readonly httpService: HttpService,
     private readonly jiraCredentialRepo: JiraCredentialRepository, // repositório para persistir tokens
+    private readonly configService: ConfigService,
   ) {}
 
   /**
@@ -48,9 +50,9 @@ export class AuthService {
   buildAuthorizationUrl(state: string): string {
     this.logger.log('Construindo URL de autorização do Jira'); // ▶️ log
 
-    // 1) Lê valores do environment
-    const clientId = process.env.JIRA_CLIENT_ID;
-    const redirectUri = process.env.JIRA_REDIRECT_URI;
+    // 1) Lê valores do environment usando ConfigService
+    const clientId = this.configService.get<string>('JIRA_CLIENT_ID');
+    const redirectUri = this.configService.get<string>('JIRA_REDIRECT_URI');
 
     // 2) Validações básicas: se faltar alguma variável, lança exceção
     if (!clientId || !redirectUri) {
@@ -107,10 +109,10 @@ export class AuthService {
     this.logger.debug(`Parâmetro code recebido: ${code}`); // ▶️ log
     this.logger.debug(`Parâmetro userId recebido: ${userId}`); // ▶️ log
 
-    // 1) Obter diretamente do env as variáveis obrigatórias para trocar o code por token
-    const clientId = process.env.JIRA_CLIENT_ID;
-    const clientSecret = process.env.JIRA_CLIENT_SECRET;
-    const redirectUri = process.env.JIRA_REDIRECT_URI;
+    // 1) Obter as variáveis de ambiente via ConfigService
+    const clientId = this.configService.get<string>('JIRA_CLIENT_ID');
+    const clientSecret = this.configService.get<string>('JIRA_CLIENT_SECRET');
+    const redirectUri = this.configService.get<string>('JIRA_REDIRECT_URI');
 
     // 2) Verificar se todas as variáveis existem, senão erro
     if (!clientId || !clientSecret || !redirectUri) {
@@ -276,9 +278,9 @@ export class AuthService {
       `Credencial existente encontrada: cloudId="${existingCred.cloudId}"`,
     ); // ▶️ log
 
-    // 2) Lê clientId e clientSecret diretamente de process.env
-    const clientId = process.env.JIRA_CLIENT_ID;
-    const clientSecret = process.env.JIRA_CLIENT_SECRET;
+    // 2) Lê clientId e clientSecret usando ConfigService
+    const clientId = this.configService.get<string>('JIRA_CLIENT_ID');
+    const clientSecret = this.configService.get<string>('JIRA_CLIENT_SECRET');
 
     if (!clientId || !clientSecret) {
       this.logger.error(
