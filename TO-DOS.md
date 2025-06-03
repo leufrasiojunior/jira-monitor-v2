@@ -48,45 +48,47 @@
 
 4.  **Validação centralizada das variáveis de ambiente**
 
-    - **Por que:** Evita tratar missing variables apenas em cada método; falha logo na inicialização se alguma estiver ausente ou malformada.
+        - **Por que:** Evita tratar missing variables apenas em cada método; falha logo na inicialização se alguma estiver ausente ou malformada.
 
-    - **O que fazer:**
+        - **O que fazer:**
 
-      - No `ConfigModule`, importe um esquema com `Joi` (ou `class-validator`) que exija:
+          - No `ConfigModule`, importe um esquema com `Joi` (ou `class-validator`) que exija:
 
-        ts
+            ts
 
-        CopiarEditar
+            CopiarEditar
 
-        `JIRA_CLIENT_ID: Joi.string().required(),
-JIRA_CLIENT_SECRET: Joi.string().required(),
-JIRA_REDIRECT_URI: Joi.string().uri().required(),`
+            `JIRA_CLIENT_ID: Joi.string().required(),
 
-      - Assim, durante startup o NestJS vai rejeitar o servidor se qualquer variável crítica estiver faltando.
+    JIRA_CLIENT_SECRET: Joi.string().required(),
+    JIRA_REDIRECT_URI: Joi.string().uri().required(),`
+
+          - Assim, durante startup o NestJS vai rejeitar o servidor se qualquer variável crítica estiver faltando.
 
 5.  **Hardening do "state" e do CSRF**
 
-    - **Por que:** Embora já gere um valor aleatório, vale aprofundar para evitar colidir em cenários de múltiplos requests concorrentes na mesma sessão.
+        - **Por que:** Embora já gere um valor aleatório, vale aprofundar para evitar colidir em cenários de múltiplos requests concorrentes na mesma sessão.
 
-    - **O que fazer:**
+        - **O que fazer:**
 
-      - Em vez de guardar apenas `string` em `session.jiraOAuthState`, considere gerar um objeto `{ nonce, expiresAt }`. Por exemplo:
+          - Em vez de guardar apenas `string` em `session.jiraOAuthState`, considere gerar um objeto `{ nonce, expiresAt }`. Por exemplo:
 
-        ts
+            ts
 
-        CopiarEditar
+            CopiarEditar
 
-        `const nonce = randomBytes(16).toString('hex');
-const expiresAt = Date.now() + 5 * 60_000; // expira em 5 min
-session.jiraOAuthState = { nonce, expiresAt };`
+            `const nonce = randomBytes(16).toString('hex');
 
-      - No callback, valide:
+    const expiresAt = Date.now() + 5 \* 60_000; // expira em 5 min
+    session.jiraOAuthState = { nonce, expiresAt };`
 
-        1.  `stateReturned === nonceStored`,
+          - No callback, valide:
 
-        2.  `Date.now() <= expiresAtStored`.
+            1.  `stateReturned === nonceStored`,
 
-      - Depois de usar, remova por completo `session.jiraOAuthState`.
+            2.  `Date.now() <= expiresAtStored`.
+
+          - Depois de usar, remova por completo `session.jiraOAuthState`.
 
 6.  **Controle de escopo e permissões**
 
@@ -219,3 +221,15 @@ Essas melhorias tornam o fluxo mais robusto e escalável, principalmente ao:
 - **Fortalecer segurança** (política de expiração de state, validação de variáveis, logs claros e captura de erros).
 
 Implemente aos poucos, validando cada parte (por exemplo, primeiro refatore para salvar tokens no banco; depois adicione o job de refresh; em seguida, abstraia as requisições HTTP para um módulo dedicado). Assim você garante que não quebre o fluxo já existente.
+
+Documentar o fluxo e endpoints no README ou Swagger:
+
+Adicionar anotações Swagger (via @nestjs/swagger) para documentar /jira/auth/install, /oauth/callback e /jira/monitor/fetch.
+
+Explicar variáveis de ambiente necessárias e exemplos de uso.
+
+Preparar para deploy ou containerização (Docker):
+
+Criar Dockerfile e docker-compose.yml (incluindo um volume para armazenar database.sqlite).
+
+Configurar variáveis de ambiente no container para JIRA_CLIENT_ID, JIRA_CLIENT_SECRET, JIRA_REDIRECT_URI e JIRA_BASE_URL.

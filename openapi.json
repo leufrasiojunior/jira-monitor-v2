@@ -1,0 +1,204 @@
+{
+  "openapi": "3.0.0",
+  "paths": {
+    "/jira/auth/install": {
+      "get": {
+        "description": "Gera um state para proteção CSRF, define userId na sessão e redireciona o navegador para a URL de autorização do Jira.",
+        "operationId": "JiraAuthController_install",
+        "parameters": [],
+        "responses": {
+          "302": {
+            "description": "Redireciona o navegador para o Jira para autenticação/consentimento."
+          },
+          "500": {
+            "description": "Erro interno (por exemplo, falha ao montar a URL de autorização)."
+          }
+        },
+        "summary": "Inicia o fluxo OAuth 2.0 (3LO) do Jira",
+        "tags": [
+          "Auth"
+        ]
+      }
+    },
+    "/oauth/callback": {
+      "get": {
+        "description": "Recebe query params `code` e `state` do Jira, valida o state contra a sessão e troca o código por tokens. Persiste os tokens no banco.",
+        "operationId": "OauthCallbackController_callback",
+        "parameters": [
+          {
+            "name": "code",
+            "required": true,
+            "in": "query",
+            "description": "Código de autorização retornado pelo Jira",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "required": true,
+            "in": "query",
+            "description": "State enviado anteriormente para prevenção de CSRF",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Autorização concluída com sucesso; retorna cloudId e expiresIn."
+          },
+          "400": {
+            "description": "Parâmetros ausentes ou inválidos (ex.: state não confere, code ausente)."
+          },
+          "500": {
+            "description": "Erro interno durante a troca de tokens ou persistência."
+          }
+        },
+        "summary": "Callback do OAuth 2.0 (Jira)",
+        "tags": [
+          "Auth"
+        ]
+      }
+    },
+    "/jira/monitor/fetch": {
+      "get": {
+        "description": "Executa imediatamente a consulta ao Jira para o projeto OMNIJS, filtra, agrupa e retorna resumo das issues.",
+        "operationId": "JiraMonitorController_fetchIssues",
+        "parameters": [
+          {
+            "name": "userId",
+            "required": false,
+            "in": "query",
+            "description": "Identificador das credenciais (ex.: \"default\")",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Retorna objeto contendo total, lista de issues e contagem por status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProcessedIssuesResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido (ex.: userId não existe)"
+          },
+          "500": {
+            "description": "Erro interno ao processar a requisição"
+          }
+        },
+        "summary": "Buscar e processar issues do Jira",
+        "tags": [
+          "Jira Monitor"
+        ]
+      }
+    }
+  },
+  "info": {
+    "title": "Jira Monitor API",
+    "description": "API para monitorar filas do Jira via OAuth 2.0 (3LO)",
+    "version": "1.0.0",
+    "contact": {}
+  },
+  "tags": [],
+  "servers": [],
+  "components": {
+    "schemas": {
+      "IssueSummaryDto": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "example": "OMNIJS-123",
+            "description": "Chave única da issue no Jira"
+          },
+          "summary": {
+            "type": "string",
+            "example": "Implementar fluxo OAuth",
+            "description": "Sumário (título) da issue"
+          },
+          "status": {
+            "type": "string",
+            "example": "In Progress",
+            "description": "Status atual da issue"
+          },
+          "created": {
+            "type": "string",
+            "example": "2025-05-20T14:30:00.000Z",
+            "description": "Data de criação da issue (formato ISO 8601)"
+          },
+          "assignee": {
+            "type": "object",
+            "example": "João Silva",
+            "description": "Nome do usuário a quem a issue está atribuída (assignee).",
+            "nullable": true
+          },
+          "reporter": {
+            "type": "object",
+            "example": "Ana Souza",
+            "description": "Nome do usuário que reportou a issue (reporter).",
+            "nullable": true
+          },
+          "priority": {
+            "type": "object",
+            "example": "High",
+            "description": "Prioridade da issue (se definida).",
+            "nullable": true
+          },
+          "timeOpenDays": {
+            "type": "number",
+            "example": 3,
+            "description": "Quantidade de dias que a issue está em aberto"
+          }
+        },
+        "required": [
+          "key",
+          "summary",
+          "status",
+          "created",
+          "assignee",
+          "reporter",
+          "priority",
+          "timeOpenDays"
+        ]
+      },
+      "ProcessedIssuesResponseDto": {
+        "type": "object",
+        "properties": {
+          "total": {
+            "type": "number",
+            "example": 5,
+            "description": "Total de issues após filtrar os status indesejados."
+          },
+          "issues": {
+            "description": "Lista de issues após processamento e filtro.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IssueSummaryDto"
+            }
+          },
+          "statusCounts": {
+            "type": "object",
+            "example": {
+              "In Progress": 2,
+              "To Do": 3
+            },
+            "description": "Objeto contendo a contagem de issues por status."
+          }
+        },
+        "required": [
+          "total",
+          "issues",
+          "statusCounts"
+        ]
+      }
+    }
+  }
+}

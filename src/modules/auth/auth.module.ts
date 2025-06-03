@@ -3,13 +3,11 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { HttpModule } from '@nestjs/axios'; // <-- importa o HttpModule aqui
-
-import { AuthService } from '../../application/services/auth/auth.service';
-import { JiraAuthController } from '../../adapters/controllers/auth/jira-auth.controller';
-import { OauthCallbackController } from '../../adapters/controllers/auth/oauth-callback.controller';
-
-import { JiraCredentialEntity } from '../../domain/entities/jira-credential.entity';
-import { JiraCredentialRepository } from '../../infra/repositories/jira/jira-credential.repository';
+import { JiraCredentialEntity } from '@domain/entities/jira-credential.entity';
+import { JiraAuthController } from '@adapters/controllers/auth/jira-auth.controller';
+import { OauthCallbackController } from '@adapters/controllers/auth/oauth-callback.controller';
+import { AuthService } from '@app/services/auth/auth.service';
+import { JiraCredentialRepository } from '@infra/repositories/jira/jira-credential.repository';
 
 @Module({
   imports: [

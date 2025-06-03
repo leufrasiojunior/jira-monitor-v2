@@ -4,15 +4,12 @@ import { Module } from '@nestjs/common';
 import { HttpModule } from '@nestjs/axios';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ScheduleModule } from '@nestjs/schedule';
-
-import { JiraCredentialEntity } from '../../domain/entities/jira-credential.entity';
-import { JiraCredentialRepository } from '../../infra/repositories/jira/jira-credential.repository';
-
-import { AuthService } from '../../application/services/auth/auth.service';
-import { JiraQueueMonitorService } from '../../application/services/queue-monitor/jira-queue-monitor.service';
-
-import { JiraMonitorController } from 'src/adapters/controllers/jira/jira-monitor.controller';
-import { ProcessIssuesUseCase } from 'src/application/usecases/jira/process-issues.usecase';
+import { JiraMonitorController } from '@adapters/controllers/jira/jira-monitor.controller';
+import { AuthService } from '@app/services/auth/auth.service';
+import { JiraQueueMonitorService } from '@app/services/queue-monitor/jira-queue-monitor.service';
+import { ProcessIssuesUseCase } from '@app/usecases/jira/process-issues.usecase';
+import { JiraCredentialEntity } from '@domain/entities/jira-credential.entity';
+import { JiraCredentialRepository } from '@infra/repositories/jira/jira-credential.repository';
 
 @Module({
   imports: [

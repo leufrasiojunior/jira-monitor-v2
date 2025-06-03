@@ -3,8 +3,8 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
-import { AuthModule } from './modules/auth/auth.module';
-import { JiraModule } from './modules/jira/jira.module'; // <-- importa o JiraModule
+import { JiraModule } from '@modules/jira/jira.module'; // <-- importa o JiraModule
+import { AuthModule } from '@modules/auth/auth.module';
 
 @Module({
   imports: [

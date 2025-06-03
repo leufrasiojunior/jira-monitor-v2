@@ -1,8 +1,9 @@
 // src/infra/repositories/jira-credential.repository.ts
 
+import { JiraCredentialEntity } from '@domain/entities/jira-credential.entity';
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { JiraCredentialEntity } from 'src/domain/entities/jira-credential.entity';
+
 import { Repository, UpdateResult } from 'typeorm';
 
 /**

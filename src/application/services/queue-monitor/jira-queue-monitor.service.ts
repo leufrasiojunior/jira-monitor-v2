@@ -4,10 +4,10 @@ import { Injectable, InternalServerErrorException } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import { Interval } from '@nestjs/schedule';
+import { JiraCredentialRepository } from '@infra/repositories/jira/jira-credential.repository';
 
-import { JiraCredentialRepository } from '../../../infra/repositories/jira/jira-credential.repository';
-import { AuthService } from '../auth/auth.service';
-import { ProcessIssuesUseCase } from 'src/application/usecases/jira/process-issues.usecase';
+import { ProcessIssuesUseCase } from '@app/usecases/jira/process-issues.usecase';
+import { AuthService } from '@services/auth/auth.service';
 
 /**
  * Serviço responsável por:

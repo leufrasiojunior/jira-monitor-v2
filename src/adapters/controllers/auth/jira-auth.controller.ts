@@ -2,38 +2,59 @@
 
 import { Controller, Get, Req, Res } from '@nestjs/common';
 import { Request, Response } from 'express';
-import { AuthService } from '../../../application/services/auth/auth.service';
 
+import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { AuthService } from '@app/services/auth/auth.service';
+
+@ApiTags('Auth') // 1) Agrupa esse controller na seção “Auth” do Swagger UI
 @Controller('jira/auth')
 export class JiraAuthController {
   constructor(private readonly authService: AuthService) {}
 
   /**
-   * Passo 7.1.2: GET /jira/auth/install
-   *
-   * 1) Gera um state aleatório e armazena em sessão (para proteção CSRF).
-   * 2) Garante que `req.session.userId` exista. Se não houver login real, define "default".
-   * 3) Monta a URL de autorização do Jira e redireciona o navegador para ela.
+   * GET /jira/auth/install
+   * Redireciona o usuário ao Jira para iniciar o fluxo OAuth 3LO.
    */
+  @ApiOperation({
+    summary: 'Inicia o fluxo OAuth 2.0 (3LO) do Jira',
+    description:
+      'Gera um state para proteção CSRF, define userId na sessão e redireciona o navegador para a URL de autorização do Jira.',
+  })
+  @ApiResponse({
+    status: 302,
+    description:
+      'Redireciona o navegador para o Jira para autenticação/consentimento.',
+  })
+  @ApiResponse({
+    status: 500,
+    description:
+      'Erro interno (por exemplo, falha ao montar a URL de autorização).',
+  })
   @Get('install')
   async install(@Req() req: Request, @Res() res: Response) {
-    // 1) Gera um state (pode ser qualquer string aleatória; em produção, use crypto).
+    // 1) Gera um state aleatório e armazena na sessão
     const state = Math.random().toString(36).substring(2);
-    // Armazena na sessão para depois validar no callback
-    req.session.jiraOAuthState = state;
 
-    // 2) Garante que exista um identificador de usuário na sessão.
-    //    - Se sua aplicação tiver autenticação, substitua por req.user.id ou similar.
-    //    - Caso não haja login, utilizamos "default" como única chave de credenciais.
-    if (!req.session.userId) {
-      req.session.userId = 'default';
+    // 2) Para evitar erro de tipagem, faremos cast de req.session para any:
+    const session = req.session as any;
+
+    // 3) Agora podemos definir as propriedades sem erro de TS
+    session.jiraOAuthState = state;
+
+    // 4) Garante que exista userId (dentro de session)
+    if (!session.userId) {
+      session.userId = 'default';
     }
 
-    // 3) Usa o AuthService para construir a URL de autorização,
-    //    passando o 'state' para evitar CSRF.
-    const authUrl = this.authService.buildAuthorizationUrl(state);
+    session.jiraOAuthState = state as any;
 
-    // 4) Redireciona o cliente para o Jira. A partir daí, o usuário fará login/autorização.
+    // 2) Garante que exista req.session.userId; usa "default" se não houver login
+    if (!session.userId) {
+      session.userId = 'default';
+    }
+
+    // 3) Constrói a URL de autorização e redireciona
+    const authUrl = this.authService.buildAuthorizationUrl(state);
     return res.redirect(authUrl);
   }
 }

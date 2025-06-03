@@ -8,7 +8,7 @@ import {
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import { AxiosResponse } from 'axios';
-import { JiraCredentialRepository } from 'src/infra/repositories/jira/jira-credential.repository';
+import { JiraCredentialRepository } from '@infra/repositories/jira/jira-credential.repository';
 
 interface TokenResponse {
   access_token: string;
