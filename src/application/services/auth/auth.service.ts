@@ -4,6 +4,7 @@ import {
   Injectable,
   BadRequestException,
   InternalServerErrorException,
+  Logger, // ▶️ import Logger
 } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
@@ -25,6 +26,8 @@ interface AccessibleResource {
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name); // ▶️ instância de Logger
+
   // URLs fixas para os endpoints de OAuth do Jira
   private readonly jiraAuthBaseUrl = 'https://auth.atlassian.com/oauth/token';
   private readonly jiraAccessibleResourcesUrl =
@@ -43,25 +46,27 @@ export class AuthService {
    * @returns URL completa para redirecionamento ao Jira.
    */
   buildAuthorizationUrl(state: string): string {
+    this.logger.log('Construindo URL de autorização do Jira'); // ▶️ log
+
     // 1) Lê valores do environment
     const clientId = process.env.JIRA_CLIENT_ID;
     const redirectUri = process.env.JIRA_REDIRECT_URI;
 
     // 2) Validações básicas: se faltar alguma variável, lança exceção
     if (!clientId || !redirectUri) {
+      this.logger.error(
+        'As variáveis de ambiente JIRA_CLIENT_ID e/ou JIRA_REDIRECT_URI não estão definidas.',
+      ); // ▶️ log
       throw new BadRequestException(
         'As variáveis de ambiente JIRA_CLIENT_ID e/ou JIRA_REDIRECT_URI não estão definidas.',
       );
     }
 
     // 3) Monta a query string com todos os parâmetros necessários:
-    //    - audience: api.atlassian.com (obrigatório para OAuth Atlassian)
-    //    - client_id: seu clientId cadastrado no Jira
-    //    - scope: “read:jira-work offline_access” para leitura de issues e uso de refresh token
-    //    - redirect_uri: para onde o Jira irá retornar o código
-    //    - state: valor de proteção CSRF
-    //    - response_type=code: indica que queremos o authorization code
-    //    - prompt=consent: força exibir tela de consentimento, garantindo refresh_token
+    this.logger.debug(
+      `Parâmetros para autorização: clientId=${clientId}, redirectUri=${redirectUri}, state=${state}`,
+    ); // ▶️ log
+
     const params = new URLSearchParams({
       audience: 'api.atlassian.com',
       client_id: clientId,
@@ -73,7 +78,9 @@ export class AuthService {
     });
 
     // 4) Retorna a URL completa de autorização
-    return `https://auth.atlassian.com/authorize?${params.toString()}`;
+    const authUrl = `https://auth.atlassian.com/authorize?${params.toString()}`;
+    this.logger.log(`URL de autorização montada: ${authUrl}`); // ▶️ log
+    return authUrl;
   }
 
   /**
@@ -96,6 +103,10 @@ export class AuthService {
     cloudId: string;
     expiresIn: number;
   }> {
+    this.logger.log('Iniciando handleCallback do AuthService'); // ▶️ log
+    this.logger.debug(`Parâmetro code recebido: ${code}`); // ▶️ log
+    this.logger.debug(`Parâmetro userId recebido: ${userId}`); // ▶️ log
+
     // 1) Obter diretamente do env as variáveis obrigatórias para trocar o code por token
     const clientId = process.env.JIRA_CLIENT_ID;
     const clientSecret = process.env.JIRA_CLIENT_SECRET;
@@ -103,6 +114,9 @@ export class AuthService {
 
     // 2) Verificar se todas as variáveis existem, senão erro
     if (!clientId || !clientSecret || !redirectUri) {
+      this.logger.error(
+        'As variáveis JIRA_CLIENT_ID, JIRA_CLIENT_SECRET e/ou JIRA_REDIRECT_URI não estão definidas.',
+      ); // ▶️ log
       throw new BadRequestException(
         'As variáveis JIRA_CLIENT_ID, JIRA_CLIENT_SECRET e/ou JIRA_REDIRECT_URI não estão definidas.',
       );
@@ -116,6 +130,7 @@ export class AuthService {
       code,
       redirect_uri: redirectUri,
     };
+    this.logger.debug(`Payload para token: ${JSON.stringify(tokenPayload)}`); // ▶️ log
 
     // 4) Fazer POST no endpoint https://auth.atlassian.com/oauth/token
     let tokenResponse: AxiosResponse<TokenResponse>;
@@ -132,8 +147,11 @@ export class AuthService {
           },
         ),
       );
+      this.logger.log('Resposta de token recebida do Jira'); // ▶️ log
     } catch (error) {
-      // Caso a requisição falhe (rede, 4xx/5xx, etc.), lança erro interno
+      this.logger.error(
+        `Falha na requisição ao endpoint de token do Jira: ${error.message}`,
+      ); // ▶️ log
       throw new InternalServerErrorException(
         `Falha na requisição ao endpoint de token do Jira: ${error.message}`,
       );
@@ -142,6 +160,11 @@ export class AuthService {
     const tokenData = tokenResponse.data;
     // 5) Validar resposta: deve conter access_token e refresh_token
     if (!tokenData.access_token || !tokenData.refresh_token) {
+      this.logger.error(
+        `Não retornou access_token ou refresh_token. Body recebido: ${JSON.stringify(
+          tokenData,
+        )}`,
+      ); // ▶️ log
       throw new BadRequestException(
         `Não retornou access_token ou refresh_token. Body recebido: ${JSON.stringify(
           tokenData,
@@ -163,7 +186,11 @@ export class AuthService {
           },
         ),
       );
+      this.logger.log('Resposta de accessible-resources recebida do Jira'); // ▶️ log
     } catch (error) {
+      this.logger.error(
+        `Falha ao buscar accessible-resources no Jira: ${error.message}`,
+      ); // ▶️ log
       throw new InternalServerErrorException(
         `Falha ao buscar accessible-resources no Jira: ${error.message}`,
       );
@@ -171,15 +198,22 @@ export class AuthService {
 
     const resources = resourcesResponse.data;
     if (!resources || resources.length === 0) {
+      this.logger.error(
+        'Nenhum recurso acessível retornado pelo Jira. Verifique suas permissões.',
+      ); // ▶️ log
       throw new BadRequestException(
         'Nenhum recurso acessível retornado pelo Jira. Verifique suas permissões.',
       );
     }
     const cloudId = resources[0].id;
+    this.logger.log(`cloudId obtido: ${cloudId}`); // ▶️ log
 
     // 7) Calcular a data de expiração do accessToken (expires_in está em segundos)
     const expiresIn = tokenData.expires_in; // ex.: 3600 = 1h
     const expiresAt = new Date(Date.now() + expiresIn * 1000);
+    this.logger.debug(
+      `Token expira em: ${expiresIn} segundos. expiresAt: ${expiresAt}`,
+    ); // ▶️ log
 
     // 8) Persistir no SQLite usando o JiraCredentialRepository
     await this.jiraCredentialRepo.upsertCredentials({
@@ -189,14 +223,19 @@ export class AuthService {
       refreshToken: tokenData.refresh_token,
       expiresAt,
     });
+    this.logger.log(
+      `Credenciais persistidas para userId="${userId}", cloudId="${cloudId}"`,
+    ); // ▶️ log
 
     // 9) (Opcional) Atualizar a sessão para uso imediato nesta requisição
     session.jiraAccessToken = tokenData.access_token;
     session.jiraRefreshToken = tokenData.refresh_token;
     session.jiraCloudId = cloudId;
     session.jiraExpiresAt = expiresAt;
+    this.logger.debug('Sessão atualizada com tokens'); // ▶️ log
 
     // 10) Retornar apenas o mínimo necessário (não exponha tokens ao front em produção)
+    this.logger.log('handleCallback concluído com sucesso'); // ▶️ log
     return {
       accessToken: tokenData.access_token,
       refreshToken: tokenData.refresh_token,
@@ -221,19 +260,30 @@ export class AuthService {
     newRefreshToken: string;
     newExpiresIn: number;
   }> {
+    this.logger.log(`Iniciando refreshAccessToken para userId="${userId}"`); // ▶️ log
+
     // 1) Buscar credencial existente no banco
     const existingCred = await this.jiraCredentialRepo.findByUserId(userId);
     if (!existingCred) {
+      this.logger.error(
+        `Nenhuma credencial encontrada para userId="${userId}".`,
+      ); // ▶️ log
       throw new BadRequestException(
         'Nenhuma credencial encontrada para este usuário. Talvez o fluxo de OAuth não tenha sido concluído.',
       );
     }
+    this.logger.debug(
+      `Credencial existente encontrada: cloudId="${existingCred.cloudId}"`,
+    ); // ▶️ log
 
     // 2) Lê clientId e clientSecret diretamente de process.env
     const clientId = process.env.JIRA_CLIENT_ID;
     const clientSecret = process.env.JIRA_CLIENT_SECRET;
 
     if (!clientId || !clientSecret) {
+      this.logger.error(
+        'As variáveis JIRA_CLIENT_ID e/ou JIRA_CLIENT_SECRET não estão definidas.',
+      ); // ▶️ log
       throw new BadRequestException(
         'As variáveis JIRA_CLIENT_ID e/ou JIRA_CLIENT_SECRET não estão definidas.',
       );
@@ -246,6 +296,7 @@ export class AuthService {
       client_secret: clientSecret,
       refresh_token: existingCred.refreshToken,
     };
+    this.logger.debug(`Payload para refresh token: ${JSON.stringify(payload)}`); // ▶️ log
 
     // 4) Faz POST para renovar
     let tokenResp: AxiosResponse<TokenResponse>;
@@ -258,7 +309,9 @@ export class AuthService {
           },
         }),
       );
+      this.logger.log('Resposta de refresh token recebida do Jira'); // ▶️ log
     } catch (error) {
+      this.logger.error(`Falha ao renovar token: ${error.message}`); // ▶️ log
       throw new InternalServerErrorException(
         `Falha ao renovar token: ${error.message}`,
       );
@@ -267,6 +320,11 @@ export class AuthService {
     const newData = tokenResp.data;
     // 5) Validar presença de access_token e refresh_token
     if (!newData.access_token || !newData.refresh_token) {
+      this.logger.error(
+        `Resposta de refresh sem access_token/refresh_token. Body: ${JSON.stringify(
+          newData,
+        )}`,
+      ); // ▶️ log
       throw new BadRequestException(
         `Resposta de refresh sem access_token/refresh_token. Body: ${JSON.stringify(
           newData,
@@ -277,6 +335,9 @@ export class AuthService {
     // 6) Calcular nova data de expiração
     const newExpiresIn = newData.expires_in;
     const newExpiresAt = new Date(Date.now() + newExpiresIn * 1000);
+    this.logger.debug(
+      `Novo token expira em ${newExpiresIn} segundos. newExpiresAt: ${newExpiresAt}`,
+    ); // ▶️ log
 
     // 7) Atualizar somente os campos necessários no banco
     await this.jiraCredentialRepo.updateAccessToken({
@@ -285,14 +346,21 @@ export class AuthService {
       newExpiresAt,
       newRefreshToken: newData.refresh_token,
     });
+    this.logger.log(
+      `Credenciais atualizadas no banco para userId="${userId}".`,
+    ); // ▶️ log
 
     // 8) (Opcional) Atualizar a sessão se enviada como parâmetro
     if (session) {
       session.jiraAccessToken = newData.access_token;
       session.jiraRefreshToken = newData.refresh_token;
       session.jiraExpiresAt = newExpiresAt;
+      this.logger.debug('Sessão atualizada com novos tokens'); // ▶️ log
     }
 
+    this.logger.log(
+      `refreshAccessToken concluído com sucesso para userId="${userId}".`,
+    ); // ▶️ log
     return {
       newAccessToken: newData.access_token,
       newRefreshToken: newData.refresh_token,

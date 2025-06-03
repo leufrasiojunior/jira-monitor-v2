@@ -108,6 +108,34 @@
           "Jira Monitor"
         ]
       }
+    },
+    "/jira/monitor/refresh-token": {
+      "get": {
+        "description": "Invoca o método que verifica o token e renova se estiver quase expirado. Retorna mensagem de sucesso ou informa que não era necessário renovar.",
+        "operationId": "JiraMonitorController_refreshTokenManually",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Token renovado com sucesso ou já estava válido.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "example": {
+                    "message": "Token renovado ou já estava válido."
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Erro interno ao tentar renovar o token."
+          }
+        },
+        "summary": "Forçar renovação manual do token do Jira",
+        "tags": [
+          "Jira Monitor"
+        ]
+      }
     }
   },
   "info": {

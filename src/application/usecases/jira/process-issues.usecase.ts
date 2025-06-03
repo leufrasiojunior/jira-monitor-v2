@@ -1,6 +1,6 @@
 // src/application/usecases/jira/process-issues.usecase.ts
 
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 
 /**
  * UseCase que recebe o JSON bruto de issues retornado pela API do Jira e:
@@ -20,24 +20,36 @@ import { Injectable } from '@nestjs/common';
  */
 @Injectable()
 export class ProcessIssuesUseCase {
+  private readonly logger = new Logger(ProcessIssuesUseCase.name);
+
   async execute(rawJson: any): Promise<any> {
-    // 1) Verifica se rawJson.issues existe e é um array
+    this.logger.log('Início do ProcessIssuesUseCase.execute');
     if (!rawJson || !Array.isArray(rawJson.issues)) {
+      this.logger.warn('JSON inválido ou sem campo issues; retornando vazio');
       return {
         total: 0,
         issues: [],
         statusCounts: {},
       };
     }
+    this.logger.debug(
+      `Número bruto de issues recebido: ${rawJson.issues.length}`,
+    );
 
     // 2) Filtra as issues que NÃO estejam em um dos status a excluir.
-    //    - Normaliza o nome do status para minúsculas, removendo espaços extras.
     const statusesToExclude = new Set(['resolvido', 'concluído', 'cancelado']);
     const filteredIssues = rawJson.issues.filter((issue: any) => {
       const statusName: string = issue.fields?.status?.name || '';
       const normalized = statusName.trim().toLowerCase();
-      return !statusesToExclude.has(normalized);
+      const exclude = statusesToExclude.has(normalized);
+      if (exclude) {
+        this.logger.debug(
+          `Excluindo issue ${issue.key} com status '${statusName}'`,
+        );
+      }
+      return !exclude;
     });
+    this.logger.log(`Issues após filtro: ${filteredIssues.length}`);
 
     // 3) Mapeia cada issue filtrada para um objeto resumido
     const mappedIssues = filteredIssues.map((issue: any) => {
@@ -58,11 +70,10 @@ export class ProcessIssuesUseCase {
         const now = Date.now();
         const createdTime = created.getTime();
         const diffMs = now - createdTime;
-        // Converte milissegundos em dias, arredondando para baixo
         timeOpenDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
       }
 
-      return {
+      const issueSummary = {
         key,
         summary,
         status,
@@ -72,24 +83,27 @@ export class ProcessIssuesUseCase {
         priority,
         timeOpenDays,
       };
+      this.logger.debug(`Issue processada: ${JSON.stringify(issueSummary)}`);
+      return issueSummary;
     });
 
     // 4) Conta quantas issues existem para cada status dinamicamente
     const statusCounts: Record<string, number> = {};
     for (const issue of mappedIssues) {
       const st = issue.status;
-      if (statusCounts[st]) {
-        statusCounts[st]++;
-      } else {
-        statusCounts[st] = 1;
-      }
+      statusCounts[st] = (statusCounts[st] || 0) + 1;
     }
+    this.logger.log(`Contagem por status: ${JSON.stringify(statusCounts)}`);
 
     // 5) Retorna o total de issues após filtro, a lista mapeada e os contadores por status
-    return {
+    const result = {
       total: mappedIssues.length,
       statusCounts,
       issues: mappedIssues,
     };
+    this.logger.log(
+      `ProcessIssuesUseCase.execute concluído; total final: ${result.total}`,
+    );
+    return result;
   }
 }
