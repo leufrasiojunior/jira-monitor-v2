@@ -7,6 +7,7 @@ import {
   Req,
   Res,
   BadRequestException,
+  Logger, // ▶️ import Logger
 } from '@nestjs/common';
 import { Request, Response } from 'express';
 
@@ -17,6 +18,8 @@ import { AuthService } from '@app/services/auth/auth.service';
 @ApiTags('Auth') // 2) Agrupa este controller na seção “Auth”
 @Controller('oauth')
 export class OauthCallbackController {
+  private readonly logger = new Logger(OauthCallbackController.name); // ▶️ instância de Logger
+
   constructor(private readonly authService: AuthService) {}
 
   /**
@@ -60,32 +63,54 @@ export class OauthCallbackController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
+    this.logger.log('Iniciando /oauth/callback'); // ▶️ log de entrada
+    this.logger.debug(
+      `Parâmetros recebidos - code: ${code}, state: ${returnedState}`,
+    ); // ▶️ log
+
     // 1) Validação do state para evitar CSRF
     const session = req.session as any;
     const originalState = session.jiraOAuthState;
     if (!returnedState || returnedState !== originalState) {
+      this.logger.warn(
+        `State inválido. Esperado: ${originalState}, recebido: ${returnedState}`,
+      ); // ▶️ log
       throw new BadRequestException('State inválido ou ausente.');
     }
+    this.logger.log('State validado com sucesso.'); // ▶️ log
     delete session.jiraOAuthState;
 
     // 2) Obtém userId da sessão (definido no JiraAuthController.install)
     const userId = session.userId;
     if (!userId) {
+      this.logger.error('userId não encontrado na sessão.'); // ▶️ log
       throw new BadRequestException('userId não encontrado na sessão.');
     }
+    this.logger.debug(`userId obtido da sessão: ${userId}`); // ▶️ log
 
     // 3) Chama o AuthService para trocar o code por tokens e persistir no banco
-    const { cloudId, expiresIn } = await this.authService.handleCallback(
-      code,
-      session,
-      userId,
-    );
+    try {
+      this.logger.log(
+        'Chamando AuthService.handleCallback para troca de tokens.',
+      ); // ▶️ log
+      const { cloudId, expiresIn } = await this.authService.handleCallback(
+        code,
+        session,
+        userId,
+      );
+      this.logger.log(
+        `Tokens trocados com sucesso. cloudId: ${cloudId}, expiresIn: ${expiresIn}`,
+      ); // ▶️ log
 
-    // 4) Retorna JSON com dados não sensíveis ao front-end
-    return res.json({
-      message: 'Autorização concluída com sucesso!',
-      cloudId,
-      expiresIn,
-    });
+      // 4) Retorna JSON com dados não sensíveis ao front-end
+      return res.json({
+        message: 'Autorização concluída com sucesso!',
+        cloudId,
+        expiresIn,
+      });
+    } catch (error) {
+      this.logger.error(`Erro em AuthService.handleCallback: ${error.message}`); // ▶️ log
+      throw error;
+    }
   }
 }

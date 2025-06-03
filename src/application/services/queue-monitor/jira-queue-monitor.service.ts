@@ -1,11 +1,15 @@
 // src/application/services/jira/jira-queue-monitor.service.ts
 
-import { Injectable, InternalServerErrorException } from '@nestjs/common';
+import {
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+} from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
-import { Interval } from '@nestjs/schedule';
-import { JiraCredentialRepository } from '@infra/repositories/jira/jira-credential.repository';
+import { Cron, CronExpression } from '@nestjs/schedule';
 
+import { JiraCredentialRepository } from '@infra/repositories/jira/jira-credential.repository';
 import { ProcessIssuesUseCase } from '@app/usecases/jira/process-issues.usecase';
 import { AuthService } from '@services/auth/auth.service';
 
@@ -16,46 +20,91 @@ import { AuthService } from '@services/auth/auth.service';
  *  3) Fazer chamada GET na API Jira para buscar issues do projeto OMNIJS.
  *  4) Encaminhar o JSON bruto para o UseCase que tratará esses dados.
  *
- * A verificação automática ocorre a cada 10 minutos (600.000 ms).
+ * A verificação automática do token ocorrerá a cada 50 minutos, via @Cron.
+ * A busca de issues ocorre a cada 10 minutos, via @Cron (cron expression).
  */
 @Injectable()
 export class JiraQueueMonitorService {
+  private readonly logger = new Logger(JiraQueueMonitorService.name);
   /**
    * Buffer de 1 minuto antes da expiração real do token:
    * se faltar menos de 1 minuto para expirar, já renovamos antecipadamente.
    */
   private readonly REFRESH_BUFFER_MS = 60 * 1000; // 1 minuto
   private readonly DEFAULT_JQL = 'project = "OMNIJS" ORDER BY created DESC';
-  s;
-
-  /**
-   * Construímos a URL completa de consulta usando:
-   *   - JIRA_BASE_URL (do .env)
-   *   - rota REST /rest/api/3/search
-   *   - JQL: project = "OMNIJS" ORDER BY created DESC
-   */
 
   constructor(
     private readonly httpService: HttpService,
     private readonly jiraCredRepo: JiraCredentialRepository,
     private readonly authService: AuthService,
-    private readonly processIssuesUseCase: ProcessIssuesUseCase, // injetamos o use case para tratar retorno
+    private readonly processIssuesUseCase: ProcessIssuesUseCase,
   ) {}
 
   /**
+   * Verifica a validade do token a cada 50 minutos:
+   * se estiver a menos de 1 minuto de expirar, renova via AuthService.refreshAccessToken().
+   */
+  @Cron('*/50 * * * *') // rodará nos minutos 0 e 50 de cada hora (aprox. a cada 50 minutos)
+  async checkAndRefreshToken() {
+    const userId = 'default';
+    this.logger.log(`Iniciando verificação de token para userId="${userId}".`);
+    const cred = await this.jiraCredRepo.findByUserId(userId);
+    if (!cred) {
+      this.logger.warn(
+        `Nenhuma credencial encontrada para userId="${userId}". Abortando check.`,
+      );
+      return;
+    }
+
+    const now = Date.now();
+    const expiresAtTime = cred.expiresAt.getTime();
+    const msLeft = expiresAtTime - now;
+    this.logger.debug(`Token expira em ${msLeft} ms para userId="${userId}".`);
+
+    if (msLeft < this.REFRESH_BUFFER_MS) {
+      this.logger.log(
+        `Token próximo da expiração (faltam ${msLeft} ms). Renovando...`,
+      );
+      try {
+        await this.authService.refreshAccessToken(userId);
+        this.logger.log(
+          `Token do Jira renovado automaticamente para userId="${userId}".`,
+        );
+      } catch (error) {
+        this.logger.error(
+          `Falha ao renovar token automaticamente para userId="${userId}": ${error.message}`,
+        );
+      }
+    } else {
+      this.logger.log(
+        `Token ainda válido (faltam ${msLeft} ms). Não é necessário renovar.`,
+      );
+    }
+  }
+
+  /**
    * Passo 8.1.1: Método agendado para rodar automaticamente a cada 10 minutos.
-   *    - Busca/renova token se necessário.
+   *    - Busca/renova token se necessário (chamando checkAndRefreshToken).
    *    - Chama a API Jira.
    *    - Encaminha o JSON para o ProcessIssuesUseCase.
    */
-  @Interval(600000) // 600.000 ms = 10 minutos
+  @Cron(CronExpression.EVERY_MINUTE)
   async handleInterval() {
-    // Sempre usamos "default" para este exemplo, pois não há múltiplos usuários ainda.
     const userId = 'default';
+    this.logger.log(
+      `Início do job agendado de busca de issues para userId="${userId}".`,
+    );
     try {
+      // Antes de buscar issues, garante que o token está válido
+      await this.checkAndRefreshToken();
       await this.fetchAndProcessIssues(userId);
+      this.logger.log(
+        `Job agendado de busca de issues concluído para userId="${userId}".`,
+      );
     } catch (err) {
-      // Logue ou trate como quiser; aqui apenas lançamos para o Nest capturar
+      this.logger.error(
+        `Erro no agendamento de JiraQueueMonitor para userId="${userId}": ${err.message}`,
+      );
       throw new InternalServerErrorException(
         `Erro no agendamento de JiraQueueMonitor: ${err.message}`,
       );
@@ -67,60 +116,90 @@ export class JiraQueueMonitorService {
    * para forçar a consulta ao Jira e processamento imediato.
    *
    * @param userId Identificador das credenciais (ex.: "default")
-   * @returns Resultado do ProcessIssuesUseCase (ou lança exceção em caso de erro).
+   * @param jql   Consulta JQL completa; se omitido, usa DEFAULT_JQL
    */
   async fetchAndProcessIssues(userId: string, jql?: string): Promise<any> {
+    this.logger.log(`Iniciando fetchAndProcessIssues para userId="${userId}".`);
     // 1) Recuperar credencial do banco para este userId
     const cred = await this.jiraCredRepo.findByUserId(userId);
     if (!cred) {
+      this.logger.error(
+        `Credenciais do Jira não encontradas para userId="${userId}".`,
+      );
       throw new InternalServerErrorException(
         `Credenciais do Jira não encontradas para userId="${userId}".`,
       );
     }
+    this.logger.debug(
+      `Credencial encontrada para userId="${userId}", cloudId="${cred.cloudId}".`,
+    );
 
-    // 2) Verificar se o accessToken expirou ou está prestes a expirar.
-    //    Se faltar menos que REFRESH_BUFFER_MS, renovamos antes de chamar a API.
+    // 2) Verificar e renovar token se necessário
     const now = Date.now();
     const expiresAtTime = cred.expiresAt.getTime();
-    if (expiresAtTime - now < this.REFRESH_BUFFER_MS) {
-      // 2.1) Invoca AuthService.refreshAccessToken para obter token novo
-      const { newAccessToken, newRefreshToken, newExpiresIn } =
-        await this.authService.refreshAccessToken(userId);
+    const msLeft = expiresAtTime - now;
+    this.logger.debug(`Token expira em ${msLeft} ms para userId="${userId}".`);
+    if (msLeft < this.REFRESH_BUFFER_MS) {
+      this.logger.log(
+        `Token próximo da expiração (faltam ${msLeft} ms). Renovando antes da busca...`,
+      );
+      try {
+        const { newAccessToken, newRefreshToken, newExpiresIn } =
+          await this.authService.refreshAccessToken(userId);
 
-      // 2.2) Atualiza as variáveis locais para usar logo em seguida
-      cred.accessToken = newAccessToken;
-      cred.refreshToken = newRefreshToken;
-      cred.expiresAt = new Date(now + newExpiresIn * 1000);
-      // (O próprio AuthService já atualizou o SQLite via repositório)
+        cred.accessToken = newAccessToken;
+        cred.refreshToken = newRefreshToken;
+        cred.expiresAt = new Date(now + newExpiresIn * 1000);
+        this.logger.log(
+          `Token renovado no fetchAndProcessIssues para userId="${userId}".`,
+        );
+      } catch (error) {
+        this.logger.error(
+          `Falha ao renovar token no fetchAndProcessIssues para userId="${userId}": ${error.message}`,
+        );
+      }
     }
 
     // 3) Decide qual JQL usar: recebido ou padrão
     const jqlToUse = jql || this.DEFAULT_JQL;
+    this.logger.log(`Usando JQL="${jqlToUse}" para userId="${userId}".`);
     const encodedJql = encodeURIComponent(jqlToUse);
 
     // 4) Monta a URL final de consulta ao Jira
     const apiUrl = `https://api.atlassian.com/ex/jira/${cred.cloudId}/rest/api/3/search?jql=${encodedJql}`;
+    this.logger.log(`Realizando GET em ${apiUrl}.`);
 
-    // 4) Executar a requisição GET para a API Jira
+    // 5) Executar a requisição GET para a API Jira
     let response;
     try {
       response = await firstValueFrom(
         this.httpService.get(apiUrl, {
           headers: {
-            Authorization: `Bearer ${cred.accessToken}`, // usa o token (possivelmente renovado)
+            Authorization: `Bearer ${cred.accessToken}`,
             Accept: 'application/json',
           },
         }),
       );
+      this.logger.log(
+        `Resposta recebida do Jira para userId="${userId}". Status: ${response.status}`,
+      );
     } catch (error) {
-      console.log(error);
+      this.logger.error(
+        `Falha ao consultar Jira em ${apiUrl} para userId="${userId}": ${error.message}`,
+      );
       throw new InternalServerErrorException(
         `Falha ao consultar Jira (${apiUrl}): ${error.message}`,
       );
     }
 
-    // 5) Enviar o JSON bruto retornado para o UseCase que irá tratá-lo
-    //    O UseCase pode filtrar, paginar, armazenar em outro local, etc.
-    return this.processIssuesUseCase.execute(response.data);
+    // 6) Enviar o JSON bruto retornado para o UseCase que irá tratá-lo
+    this.logger.log(
+      `Enviando dados para ProcessIssuesUseCase para userId="${userId}".`,
+    );
+    const result = await this.processIssuesUseCase.execute(response.data);
+    this.logger.log(
+      `ProcessIssuesUseCase concluído para userId="${userId}". Total issues: ${result.total}`,
+    );
+    return result;
   }
 }

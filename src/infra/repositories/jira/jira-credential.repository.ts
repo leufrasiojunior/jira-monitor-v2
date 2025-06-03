@@ -1,7 +1,7 @@
 // src/infra/repositories/jira-credential.repository.ts
 
 import { JiraCredentialEntity } from '@domain/entities/jira-credential.entity';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common'; // ▶️ import Logger
 import { InjectRepository } from '@nestjs/typeorm';
 
 import { Repository, UpdateResult } from 'typeorm';
@@ -16,6 +16,8 @@ import { Repository, UpdateResult } from 'typeorm';
  */
 @Injectable()
 export class JiraCredentialRepository {
+  private readonly logger = new Logger(JiraCredentialRepository.name); // ▶️ instância de Logger
+
   constructor(
     // Injetamos o repositório TypeORM para a entidade JiraCredentialEntity.
     @InjectRepository(JiraCredentialEntity)
@@ -42,20 +44,29 @@ export class JiraCredentialRepository {
     expiresAt: Date;
   }): Promise<JiraCredentialEntity> {
     const { userId, cloudId, accessToken, refreshToken, expiresAt } = params;
+    this.logger.log(`upsertCredentials chamado para userId="${userId}"`); // ▶️ log de entrada
 
     // 1) Busca registro existente pelo userId.
     const existing = await this.repo.findOne({ where: { userId } });
-
     if (existing) {
+      this.logger.log(
+        `Credencial existente encontrada para userId="${userId}". Atualizando campos.`,
+      ); // ▶️ log
       // 2a) Se já existe, atualiza apenas os campos relacionados a tokens e expiresAt.
       existing.cloudId = cloudId;
       existing.accessToken = accessToken;
       existing.refreshToken = refreshToken;
       existing.expiresAt = expiresAt;
-      // Ao chamar save(existing), o TypeORM vai atualizar o registro e setar updatedAt.
-      return await this.repo.save(existing);
+      const saved = await this.repo.save(existing);
+      this.logger.log(
+        `Credenciais atualizadas no banco para userId="${userId}".`,
+      ); // ▶️ log de sucesso
+      return saved;
     }
 
+    this.logger.log(
+      `Nenhuma credencial existente para userId="${userId}". Criando nova.`,
+    ); // ▶️ log
     // 2b) Se não existe, cria um novo registro com todos os dados.
     const newCred = this.repo.create({
       userId,
@@ -64,17 +75,28 @@ export class JiraCredentialRepository {
       refreshToken,
       expiresAt,
     });
-    return await this.repo.save(newCred);
+    const savedNew = await this.repo.save(newCred);
+    this.logger.log(`Nova credencial persistida para userId="${userId}".`); // ▶️ log de sucesso
+    return savedNew;
   }
 
   /**
    * Busca credenciais existentes para um determinado userId.
    *
    * @param userId Identificador do usuário/instalação.
-   * @returns A entidade JiraCredentialEntity ou undefined se não encontrada.
+   * @returns A entidade JiraCredentialEntity ou null se não encontrada.
    */
   async findByUserId(userId: string): Promise<JiraCredentialEntity | null> {
-    return this.repo.findOne({ where: { userId } });
+    this.logger.log(`findByUserId chamado para userId="${userId}"`); // ▶️ log de entrada
+    const result = await this.repo.findOne({ where: { userId } });
+    if (result) {
+      this.logger.log(`Credencial encontrada para userId="${userId}".`); // ▶️ log de sucesso
+    } else {
+      this.logger.warn(
+        `Nenhuma credencial encontrada para userId="${userId}".`,
+      ); // ▶️ log de aviso
+    }
+    return result;
   }
 
   /**
@@ -95,20 +117,29 @@ export class JiraCredentialRepository {
     newRefreshToken?: string;
   }): Promise<UpdateResult> {
     const { userId, newAccessToken, newExpiresAt, newRefreshToken } = params;
+    this.logger.log(`updateAccessToken chamado para userId="${userId}"`); // ▶️ log de entrada
 
     // Montamos um objeto parcial apenas com as colunas que mudam.
     const updateData: Partial<JiraCredentialEntity> = {
       accessToken: newAccessToken,
       expiresAt: newExpiresAt,
     };
+    this.logger.debug(`Dados para update: ${JSON.stringify(updateData)}`); // ▶️ log debug
 
     // Se veio um novo refreshToken do Jira, atualizamos também.
     if (newRefreshToken) {
       updateData.refreshToken = newRefreshToken;
+      this.logger.debug(
+        `Novo refreshToken incluso no update para userId="${userId}"`,
+      ); // ▶️ log debug
     }
 
     // Executa update WHERE userId = :userId
-    return this.repo.update({ userId }, updateData);
+    const result = await this.repo.update({ userId }, updateData);
+    this.logger.log(
+      `updateAccessToken concluído para userId="${userId}". Affected: ${result.affected}`,
+    ); // ▶️ log de sucesso
+    return result;
   }
 
   /**
@@ -118,6 +149,8 @@ export class JiraCredentialRepository {
    * @param userId Identificador do usuário/instalação.
    */
   async deleteByUserId(userId: string): Promise<void> {
+    this.logger.log(`deleteByUserId chamado para userId="${userId}"`); // ▶️ log de entrada
     await this.repo.delete({ userId });
+    this.logger.log(`Credenciais removidas para userId="${userId}".`); // ▶️ log de sucesso
   }
 }
