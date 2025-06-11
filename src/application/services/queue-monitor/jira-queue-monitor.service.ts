@@ -40,6 +40,74 @@ export class JiraQueueMonitorService {
     private readonly processIssuesUseCase: ProcessIssuesUseCase,
   ) {}
 
+  private async performPostActions(
+    issueKey: string,
+    accessToken: string,
+  ): Promise<void> {
+    const baseUrl = `https://brandlive-summa.atlassian.net/rest/api/3/issue/${issueKey}`;
+    const headers = {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    };
+
+    try {
+      const updatePayload = {
+        fields: {
+          customfield_11231: { value: 'Minor / Localized' },
+        },
+      };
+      await firstValueFrom(
+        this.httpService.post(baseUrl, updatePayload, { headers }),
+      );
+
+      const transitionsUrl = `${baseUrl}/transitions`;
+      await firstValueFrom(
+        this.httpService.post(
+          transitionsUrl,
+          { transition: { id: '11' } },
+          { headers },
+        ),
+      );
+      await firstValueFrom(
+        this.httpService.post(
+          transitionsUrl,
+          { transition: { id: '131' } },
+          { headers },
+        ),
+      );
+
+      const commentPayload = {
+        body: {
+          type: 'doc',
+          version: 1,
+          content: [
+            {
+              type: 'paragraph',
+              content: [
+                {
+                  type: 'text',
+                  text: 'Sua solicitação está sob análise. Estamos trabalhando para resolvê-la o mais rápido possível.\nAtenciosamente,\nEquipe de Suporte ',
+                },
+              ],
+            },
+          ],
+        },
+      };
+      await firstValueFrom(
+        this.httpService.post(`${baseUrl}/comment`, commentPayload, {
+          headers,
+        }),
+      );
+
+      this.logger.log(`Post actions concluídas para issue ${issueKey}`);
+    } catch (error) {
+      this.logger.error(
+        `Falha ao executar post actions para issue ${issueKey}: ${error.message}`,
+      );
+    }
+  }
+
   /**
    * Verifica a validade do token a cada 50 minutos:
    * se estiver a menos de 1 minuto de expirar, renova via AuthService.refreshAccessToken().
@@ -200,6 +268,16 @@ export class JiraQueueMonitorService {
     this.logger.log(
       `ProcessIssuesUseCase concluído para userId="${userId}". Total issues: ${result.total}`,
     );
+
+    const openIssues = result.issues.filter((issue: any) => {
+      const st = (issue.status || '').toLowerCase();
+      return st.includes('open') || st.includes('aberto');
+    });
+
+    for (const issue of openIssues) {
+      await this.performPostActions(issue.key, cred.accessToken);
+    }
+
     return result;
   }
 }
