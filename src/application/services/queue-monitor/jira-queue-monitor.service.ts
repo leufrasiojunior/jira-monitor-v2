@@ -43,8 +43,9 @@ export class JiraQueueMonitorService {
   private async performPostActions(
     issueKey: string,
     accessToken: string,
+    cloudId: string,
   ): Promise<void> {
-    const baseUrl = `https://brandlive-summa.atlassian.net/rest/api/3/issue/${issueKey}`;
+    const baseUrl = `https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/issue/${issueKey}`;
     const headers = {
       Authorization: `Bearer ${accessToken}`,
       Accept: 'application/json',
@@ -275,7 +276,7 @@ export class JiraQueueMonitorService {
     });
 
     for (const issue of openIssues) {
-      await this.performPostActions(issue.key, cred.accessToken);
+      await this.performPostActions(issue.key, cred.accessToken, cred.cloudId);
     }
 
     return result;
