@@ -49,7 +49,6 @@ export class JiraQueueMonitorService {
     const headers = {
       Authorization: `Bearer ${accessToken}`,
       Accept: 'application/json',
-      'Content-Type': 'application/json',
     };
 
     try {
