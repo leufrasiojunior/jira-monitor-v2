@@ -1,5 +1,33 @@
 // src/application/services/jira/jira-queue-monitor.service.ts
 
+/**
+ * JiraQueueMonitorService
+ * ----------------------
+ * Serviço principal para monitorar filas de issues do Jira e executar ações automatizadas.
+ *
+ * Funcionalidades:
+ *   1) Busca de issues abertas via JQL (Query Language do Jira) a partir da API de Search.
+ *   2) Processamento dos dados brutos via UseCase para filtrar, mapear e agrupar resultados.
+ *   3) Execução de ações automáticas em cada issue aberta:
+ *      - Atualização de campos customizados (PUT /issue/{issueKey}).
+ *      - Transição de status para fluxos de trabalho (POST /issue/{issueKey}/transitions).
+ *      - Inclusão de comentários (POST /issue/{issueKey}/comment).
+ *   4) Agendamento periódico do fluxo de fetch (cron configurável).
+ *
+ * Autenticação:
+ *   - Operações de leitura (Search) usam Basic Auth com JIRA_EMAIL e JIRA_API_TOKEN.
+ *   - Operações de escrita (PUT/POST em issue) usam Basic Auth com JIRA_EMAIL e JIRA_API_TOKEN.
+ *
+ * Configurações via Variáveis de Ambiente (.env):
+ *   - JIRA_API_BASE_URL: URL base para calls de Search (https://api.atlassian.com).
+ *   - JIRA_BASE_URL: URL base da instância Jira Cloud (ex.: https://meu-domain.atlassian.net).
+ *   - JIRA_EMAIL: e-mail da conta Atlassian para Basic Auth.
+ *   - JIRA_API_TOKEN: token de API gerado em id.atlassian.com.
+ *
+ * Fluxo de execução:
+ *   handleInterval() -> fetchAndProcessIssues(userId) -> processIssuesUseCase.execute()
+ *     -> performPostActions(issueKey, cloudId) para cada issue aberta.
+ */
 import {
   Injectable,
   InternalServerErrorException,
@@ -11,72 +39,97 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 
 import { JiraCredentialRepository } from '@infra/repositories/jira/jira-credential.repository';
 import { ProcessIssuesUseCase } from '@app/usecases/jira/process-issues.usecase';
-import { AuthService } from '@services/auth/auth.service';
+import { ConfigService } from '@nestjs/config';
 
-/**
- * Serviço responsável por:
- *  1) Recuperar do banco (SQLite) as credenciais OAuth do Jira para um dado userId.
- *  2) Verificar o token (accessToken) e renovar automaticamente se estiver perto de expirar.
- *  3) Fazer chamada GET na API Jira para buscar issues do projeto OMNIJS.
- *  4) Encaminhar o JSON bruto para o UseCase que tratará esses dados.
- *
- * A verificação automática do token ocorrerá a cada 50 minutos, via @Cron.
- * A busca de issues ocorre a cada 10 minutos, via @Cron (cron expression).
- */
 @Injectable()
 export class JiraQueueMonitorService {
+  // Logger para registrar eventos e facilitar debug
   private readonly logger = new Logger(JiraQueueMonitorService.name);
-  /**
-   * Buffer de 1 minuto antes da expiração real do token:
-   * se faltar menos de 1 minuto para expirar, já renovamos antecipadamente.
-   */
-  private readonly REFRESH_BUFFER_MS = 60 * 1000; // 1 minuto
+  // JQL padrão para buscar issues do projeto OMNIJS, ordenadas por data de criação
   private readonly DEFAULT_JQL = 'project = "OMNIJS" ORDER BY created DESC';
 
   constructor(
-    private readonly httpService: HttpService,
-    private readonly jiraCredRepo: JiraCredentialRepository,
-    private readonly authService: AuthService,
-    private readonly processIssuesUseCase: ProcessIssuesUseCase,
+    private readonly httpService: HttpService, // Cliente HTTP do Nest
+    private readonly jiraCredRepo: JiraCredentialRepository, // Repositório para obter cloudId
+    private readonly configService: ConfigService, // Acesso a variáveis de ambiente
+    private readonly processIssuesUseCase: ProcessIssuesUseCase, // UseCase para processamento de issues
   ) {}
 
-  private async performPostActions(
-    issueKey: string,
-    accessToken: string,
-    cloudId: string,
-  ): Promise<void> {
-    const baseUrl = `https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/issue/${issueKey}`;
+  /**
+   * performPostActions
+   * ------------------
+   * Executa ações de escrita em uma issue específica:
+   *   - Atualiza campos customizados (PUT)
+   *   - Executa transições de workflow (POST /transitions)
+   *   - Adiciona comentário (POST /comment)
+   *
+   * @param issueKey - chave da issue (ex.: "OMNIJS-123")
+   * @param cloudId  - identificador da instância Jira para Search
+   */
+  async performPostActions(issueKey: string, cloudId: string): Promise<void> {
+    // 1) Obter URL base da instância Jira Cloud
+    const jiraBase = this.configService.get<string>('JIRA_API_BASE_URL');
+    const cloudID = this.configService.get<string>('JIRA_CLOUD_ID');
+
+    if (!jiraBase) {
+      this.logger.error('Variável JIRA_API_BASE_URL não definida');
+      throw new InternalServerErrorException(
+        'Configuração ausente: JIRA_API_BASE_URL',
+      );
+    }
+    this.logger.debug(`Usando JIRA_API_BASE_URL=${jiraBase}`);
+
+    // 2) Montar Basic Auth a partir de e-mail e token de API
+    const email = this.configService.get<string>('JIRA_USERNAME');
+    const apiToken = this.configService.get<string>('JIRA_API_TOKEN');
+    if (!email || !apiToken) {
+      this.logger.error('JIRA_USERNAME ou JIRA_API_TOKEN não definidos');
+      throw new InternalServerErrorException('Credenciais Basic Auth ausentes');
+    }
+    const basicAuth = Buffer.from(`${email}:${apiToken}`).toString('base64');
+
+    // 3) Definir URL e headers para as chamadas
+    const issueUrl = `${jiraBase}/ex/jira/${cloudID}/rest/api/3/issue/${issueKey}`;
+
     const headers = {
-      Authorization: `Bearer ${accessToken}`,
+      Authorization: `Basic ${basicAuth}`,
       Accept: 'application/json',
+      'Content-Type': 'application/json',
     };
 
     try {
+      // 3.1) PUT - Atualizar campo customizado
       const updatePayload = {
-        fields: {
-          customfield_11231: { value: 'Minor / Localized' },
-        },
+        fields: { customfield_11231: { value: 'Minor / Localized' } },
       };
+      this.logger.debug(
+        `PUT ${issueUrl} payload=${JSON.stringify(updatePayload)}`,
+      );
       await firstValueFrom(
-        this.httpService.post(baseUrl, updatePayload, { headers }),
+        this.httpService.put(issueUrl, updatePayload, { headers }),
       );
 
-      const transitionsUrl = `${baseUrl}/transitions`;
-      await firstValueFrom(
-        this.httpService.post(
-          transitionsUrl,
-          { transition: { id: '11' } },
-          { headers },
-        ),
+      // 3.2) POST - Primeira transição de workflow
+      const transitionsUrl = `${issueUrl}/transitions`;
+      const transition1 = { transition: { id: '11' } };
+      this.logger.debug(
+        `POST ${transitionsUrl} payload=${JSON.stringify(transition1)}`,
       );
       await firstValueFrom(
-        this.httpService.post(
-          transitionsUrl,
-          { transition: { id: '131' } },
-          { headers },
-        ),
+        this.httpService.post(transitionsUrl, transition1, { headers }),
       );
 
+      // 3.3) POST - Segunda transição de workflow
+      const transition2 = { transition: { id: '131' } };
+      this.logger.debug(
+        `POST ${transitionsUrl} payload=${JSON.stringify(transition2)}`,
+      );
+      await firstValueFrom(
+        this.httpService.post(transitionsUrl, transition2, { headers }),
+      );
+
+      // 3.4) POST - Adicionar comentário rich-text
+      const commentUrl = `${issueUrl}/comment`;
       const commentPayload = {
         body: {
           type: 'doc',
@@ -87,195 +140,122 @@ export class JiraQueueMonitorService {
               content: [
                 {
                   type: 'text',
-                  text: 'Sua solicitação está sob análise. Estamos trabalhando para resolvê-la o mais rápido possível.\nAtenciosamente,\nEquipe de Suporte ',
+                  text: 'Sua solicitação está sob análise. Atenciosamente, Equipe de Suporte.',
                 },
               ],
             },
           ],
         },
       };
+      this.logger.debug(
+        `POST ${commentUrl} payload=${JSON.stringify(commentPayload)}`,
+      );
       await firstValueFrom(
-        this.httpService.post(`${baseUrl}/comment`, commentPayload, {
-          headers,
-        }),
+        this.httpService.post(commentUrl, commentPayload, { headers }),
       );
 
       this.logger.log(`Post actions concluídas para issue ${issueKey}`);
     } catch (error) {
       this.logger.error(
-        `Falha ao executar post actions para issue ${issueKey}: ${error.message}`,
+        `Falha no post actions para ${issueKey}: ${error.message}`,
       );
     }
   }
 
   /**
-   * Verifica a validade do token a cada 50 minutos:
-   * se estiver a menos de 1 minuto de expirar, renova via AuthService.refreshAccessToken().
-   */
-  @Cron('*/50 * * * *') // rodará nos minutos 0 e 50 de cada hora (aprox. a cada 50 minutos)
-  async checkAndRefreshToken() {
-    const userId = 'default';
-    this.logger.log(`Iniciando verificação de token para userId="${userId}".`);
-    const cred = await this.jiraCredRepo.findByUserId(userId);
-    if (!cred) {
-      this.logger.warn(
-        `Nenhuma credencial encontrada para userId="${userId}". Abortando check.`,
-      );
-      return;
-    }
-
-    const now = Date.now();
-    const expiresAtTime = cred.expiresAt.getTime();
-    const msLeft = expiresAtTime - now;
-    this.logger.debug(`Token expira em ${msLeft} ms para userId="${userId}".`);
-
-    if (msLeft < this.REFRESH_BUFFER_MS) {
-      this.logger.log(
-        `Token próximo da expiração (faltam ${msLeft} ms). Renovando...`,
-      );
-      try {
-        await this.authService.refreshAccessToken(userId);
-        this.logger.log(
-          `Token do Jira renovado automaticamente para userId="${userId}".`,
-        );
-      } catch (error) {
-        this.logger.error(
-          `Falha ao renovar token automaticamente para userId="${userId}": ${error.message}`,
-        );
-      }
-    } else {
-      this.logger.log(
-        `Token ainda válido (faltam ${msLeft} ms). Não é necessário renovar.`,
-      );
-    }
-  }
-
-  /**
-   * Passo 8.1.1: Método agendado para rodar automaticamente a cada 10 minutos.
-   *    - Busca/renova token se necessário (chamando checkAndRefreshToken).
-   *    - Chama a API Jira.
-   *    - Encaminha o JSON para o ProcessIssuesUseCase.
+   * handleInterval
+   * --------------
+   * Job Cron que dispara a cada minuto (configurável) para:
+   *   - Buscar e processar issues
+   *   - Executar ações automáticas em issues abertas
    */
   @Cron(CronExpression.EVERY_MINUTE)
   async handleInterval() {
     const userId = 'default';
     this.logger.log(
-      `Início do job agendado de busca de issues para userId="${userId}".`,
+      `Iniciando cron fetchAndProcessIssues para userId=${userId}`,
     );
     try {
-      // Antes de buscar issues, garante que o token está válido
-      await this.checkAndRefreshToken();
       await this.fetchAndProcessIssues(userId);
-      this.logger.log(
-        `Job agendado de busca de issues concluído para userId="${userId}".`,
-      );
+      this.logger.log(`Cron concluído para userId=${userId}`);
     } catch (err) {
-      this.logger.error(
-        `Erro no agendamento de JiraQueueMonitor para userId="${userId}": ${err.message}`,
-      );
-      throw new InternalServerErrorException(
-        `Erro no agendamento de JiraQueueMonitor: ${err.message}`,
-      );
+      this.logger.error(`Erro no cron: ${err.message}`);
+      throw new InternalServerErrorException(err.message);
     }
   }
 
   /**
-   * Função pública que pode ser chamada diretamente (por exemplo, via controller)
-   * para forçar a consulta ao Jira e processamento imediato.
+   * fetchAndProcessIssues
+   * ----------------------
+   * 1) Obtém cloudId do banco
+   * 2) Monta e executa GET /search via API Atlassian com Basic Auth
+   * 3) Processa JSON bruto via ProcessIssuesUseCase
+   * 4) Para cada issue aberta, chama performPostActions
    *
-   * @param userId Identificador das credenciais (ex.: "default")
-   * @param jql   Consulta JQL completa; se omitido, usa DEFAULT_JQL
+   * @param userId - id de credenciais ("default")
+   * @param jql    - string JQL opcional (usa DEFAULT_JQL se ausente)
    */
   async fetchAndProcessIssues(userId: string, jql?: string): Promise<any> {
-    this.logger.log(`Iniciando fetchAndProcessIssues para userId="${userId}".`);
-    // 1) Recuperar credencial do banco para este userId
+    this.logger.log(`fetchAndProcessIssues iniciado para userId=${userId}`);
+
+    // 1) Recuperar credenciais e cloudId
     const cred = await this.jiraCredRepo.findByUserId(userId);
     if (!cred) {
-      this.logger.error(
-        `Credenciais do Jira não encontradas para userId="${userId}".`,
-      );
+      this.logger.error(`Credenciais não encontradas para userId=${userId}`);
+      throw new InternalServerErrorException('Credenciais não encontradas');
+    }
+    const cloudId = cred.cloudId;
+
+    // 2) Montar URL de Search
+    const apiBase = this.configService.get<string>('JIRA_API_BASE_URL');
+    if (!apiBase) {
+      this.logger.error('JIRA_API_BASE_URL não definida');
       throw new InternalServerErrorException(
-        `Credenciais do Jira não encontradas para userId="${userId}".`,
+        'Configuração ausente: JIRA_API_BASE_URL',
       );
     }
-    this.logger.debug(
-      `Credencial encontrada para userId="${userId}", cloudId="${cred.cloudId}".`,
-    );
+    this.logger.debug(`Usando JIRA_API_BASE_URL=${apiBase}`);
 
-    // 2) Verificar e renovar token se necessário
-    const now = Date.now();
-    const expiresAtTime = cred.expiresAt.getTime();
-    const msLeft = expiresAtTime - now;
-    this.logger.debug(`Token expira em ${msLeft} ms para userId="${userId}".`);
-    if (msLeft < this.REFRESH_BUFFER_MS) {
-      this.logger.log(
-        `Token próximo da expiração (faltam ${msLeft} ms). Renovando antes da busca...`,
-      );
-      try {
-        const { newAccessToken, newRefreshToken, newExpiresIn } =
-          await this.authService.refreshAccessToken(userId);
-
-        cred.accessToken = newAccessToken;
-        cred.refreshToken = newRefreshToken;
-        cred.expiresAt = new Date(now + newExpiresIn * 1000);
-        this.logger.log(
-          `Token renovado no fetchAndProcessIssues para userId="${userId}".`,
-        );
-      } catch (error) {
-        this.logger.error(
-          `Falha ao renovar token no fetchAndProcessIssues para userId="${userId}": ${error.message}`,
-        );
-      }
-    }
-
-    // 3) Decide qual JQL usar: recebido ou padrão
     const jqlToUse = jql || this.DEFAULT_JQL;
-    this.logger.log(`Usando JQL="${jqlToUse}" para userId="${userId}".`);
     const encodedJql = encodeURIComponent(jqlToUse);
+    const apiUrl = `${apiBase}/ex/jira/${cloudId}/rest/api/3/search?jql=${encodedJql}&maxResults=50`;
+    this.logger.log(`GET ${apiUrl}`);
 
-    // 4) Monta a URL final de consulta ao Jira
-    const apiUrl = `https://api.atlassian.com/ex/jira/${cred.cloudId}/rest/api/3/search?jql=${encodedJql}`;
-    this.logger.log(`Realizando GET em ${apiUrl}.`);
+    // 3) Executar GET com Basic Auth
+    const email = this.configService.get<string>('JIRA_USERNAME');
+    const token = this.configService.get<string>('JIRA_API_TOKEN');
+    if (!email || !token) {
+      this.logger.error('JIRA_EMAIL ou JIRA_API_TOKEN não definidos');
+      throw new InternalServerErrorException('Credenciais Basic Auth ausentes');
+    }
+    const basicAuth = Buffer.from(`${email}:${token}`).toString('base64');
 
-    // 5) Executar a requisição GET para a API Jira
     let response;
     try {
       response = await firstValueFrom(
         this.httpService.get(apiUrl, {
           headers: {
-            Authorization: `Bearer ${cred.accessToken}`,
+            Authorization: `Basic ${basicAuth}`,
             Accept: 'application/json',
           },
         }),
       );
-      this.logger.log(
-        `Resposta recebida do Jira para userId="${userId}". Status: ${response.status}`,
-      );
+      this.logger.log(`GET concluído com status ${response.status}`);
     } catch (error) {
-      this.logger.error(
-        `Falha ao consultar Jira em ${apiUrl} para userId="${userId}": ${error.message}`,
-      );
-      throw new InternalServerErrorException(
-        `Falha ao consultar Jira (${apiUrl}): ${error.message}`,
-      );
+      this.logger.error(`Falha no GET ${apiUrl}: ${error.message}`);
+      throw new InternalServerErrorException(error.message);
     }
 
-    // 6) Enviar o JSON bruto retornado para o UseCase que irá tratá-lo
-    this.logger.log(
-      `Enviando dados para ProcessIssuesUseCase para userId="${userId}".`,
-    );
+    // 4) Processar issues
     const result = await this.processIssuesUseCase.execute(response.data);
-    this.logger.log(
-      `ProcessIssuesUseCase concluído para userId="${userId}". Total issues: ${result.total}`,
+    this.logger.log(`ProcessIssuesUseCase result.total=${result.total}`);
+
+    // 5) Executar ações em issues abertas
+    const openIssues = result.issues.filter((i) =>
+      ['open', 'aberto'].some((s) => i.status.toLowerCase().includes(s)),
     );
-
-    const openIssues = result.issues.filter((issue: any) => {
-      const st = (issue.status || '').toLowerCase();
-      return st.includes('open') || st.includes('aberto');
-    });
-
     for (const issue of openIssues) {
-      await this.performPostActions(issue.key, cred.accessToken, cred.cloudId);
+      await this.performPostActions(issue.key, cloudId);
     }
 
     return result;
