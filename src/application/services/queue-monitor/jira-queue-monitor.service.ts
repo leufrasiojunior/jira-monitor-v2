@@ -9,45 +9,35 @@ import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import { Cron, CronExpression } from '@nestjs/schedule';
 
-import { JiraCredentialRepository } from '@infra/repositories/jira/jira-credential.repository';
+import { ConfigService } from '@nestjs/config';
 import { ProcessIssuesUseCase } from '@app/usecases/jira/process-issues.usecase';
-import { AuthService } from '@services/auth/auth.service';
 
 /**
  * Serviço responsável por:
- *  1) Recuperar do banco (SQLite) as credenciais OAuth do Jira para um dado userId.
- *  2) Verificar o token (accessToken) e renovar automaticamente se estiver perto de expirar.
- *  3) Fazer chamada GET na API Jira para buscar issues do projeto OMNIJS.
- *  4) Encaminhar o JSON bruto para o UseCase que tratará esses dados.
+ *  1) Fazer chamada GET na API Jira usando autenticação básica.
+ *  2) Encaminhar o JSON bruto para o UseCase que tratará esses dados.
  *
- * A verificação automática do token ocorrerá a cada 50 minutos, via @Cron.
  * A busca de issues ocorre a cada 10 minutos, via @Cron (cron expression).
  */
 @Injectable()
 export class JiraQueueMonitorService {
   private readonly logger = new Logger(JiraQueueMonitorService.name);
-  /**
-   * Buffer de 1 minuto antes da expiração real do token:
-   * se faltar menos de 1 minuto para expirar, já renovamos antecipadamente.
-   */
-  private readonly REFRESH_BUFFER_MS = 60 * 1000; // 1 minuto
   private readonly DEFAULT_JQL = 'project = "OMNIJS" ORDER BY created DESC';
 
   constructor(
     private readonly httpService: HttpService,
-    private readonly jiraCredRepo: JiraCredentialRepository,
-    private readonly authService: AuthService,
+    private readonly configService: ConfigService,
     private readonly processIssuesUseCase: ProcessIssuesUseCase,
   ) {}
 
-  private async performPostActions(
-    issueKey: string,
-    accessToken: string,
-    cloudId: string,
-  ): Promise<void> {
-    const baseUrl = `https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/issue/${issueKey}`;
+  private async performPostActions(issueKey: string): Promise<void> {
+    const jiraBaseUrl = this.configService.get<string>('JIRA_BASE_URL');
+    const username = this.configService.get<string>('JIRA_USERNAME');
+    const apiToken = this.configService.get<string>('JIRA_API_TOKEN');
+    const auth = Buffer.from(`${username}:${apiToken}`).toString('base64');
+    const baseUrl = `${jiraBaseUrl}/rest/api/3/issue/${issueKey}`;
     const headers = {
-      Authorization: `Bearer ${accessToken}`,
+      Authorization: `Basic ${auth}`,
       Accept: 'application/json',
     };
 
@@ -109,51 +99,8 @@ export class JiraQueueMonitorService {
   }
 
   /**
-   * Verifica a validade do token a cada 50 minutos:
-   * se estiver a menos de 1 minuto de expirar, renova via AuthService.refreshAccessToken().
-   */
-  @Cron('*/50 * * * *') // rodará nos minutos 0 e 50 de cada hora (aprox. a cada 50 minutos)
-  async checkAndRefreshToken() {
-    const userId = 'default';
-    this.logger.log(`Iniciando verificação de token para userId="${userId}".`);
-    const cred = await this.jiraCredRepo.findByUserId(userId);
-    if (!cred) {
-      this.logger.warn(
-        `Nenhuma credencial encontrada para userId="${userId}". Abortando check.`,
-      );
-      return;
-    }
-
-    const now = Date.now();
-    const expiresAtTime = cred.expiresAt.getTime();
-    const msLeft = expiresAtTime - now;
-    this.logger.debug(`Token expira em ${msLeft} ms para userId="${userId}".`);
-
-    if (msLeft < this.REFRESH_BUFFER_MS) {
-      this.logger.log(
-        `Token próximo da expiração (faltam ${msLeft} ms). Renovando...`,
-      );
-      try {
-        await this.authService.refreshAccessToken(userId);
-        this.logger.log(
-          `Token do Jira renovado automaticamente para userId="${userId}".`,
-        );
-      } catch (error) {
-        this.logger.error(
-          `Falha ao renovar token automaticamente para userId="${userId}": ${error.message}`,
-        );
-      }
-    } else {
-      this.logger.log(
-        `Token ainda válido (faltam ${msLeft} ms). Não é necessário renovar.`,
-      );
-    }
-  }
-
-  /**
    * Passo 8.1.1: Método agendado para rodar automaticamente a cada 10 minutos.
-   *    - Busca/renova token se necessário (chamando checkAndRefreshToken).
-   *    - Chama a API Jira.
+   *    - Chama a API Jira usando autenticação básica.
    *    - Encaminha o JSON para o ProcessIssuesUseCase.
    */
   @Cron(CronExpression.EVERY_MINUTE)
@@ -163,8 +110,6 @@ export class JiraQueueMonitorService {
       `Início do job agendado de busca de issues para userId="${userId}".`,
     );
     try {
-      // Antes de buscar issues, garante que o token está válido
-      await this.checkAndRefreshToken();
       await this.fetchAndProcessIssues(userId);
       this.logger.log(
         `Job agendado de busca de issues concluído para userId="${userId}".`,
@@ -188,53 +133,18 @@ export class JiraQueueMonitorService {
    */
   async fetchAndProcessIssues(userId: string, jql?: string): Promise<any> {
     this.logger.log(`Iniciando fetchAndProcessIssues para userId="${userId}".`);
-    // 1) Recuperar credencial do banco para este userId
-    const cred = await this.jiraCredRepo.findByUserId(userId);
-    if (!cred) {
-      this.logger.error(
-        `Credenciais do Jira não encontradas para userId="${userId}".`,
-      );
-      throw new InternalServerErrorException(
-        `Credenciais do Jira não encontradas para userId="${userId}".`,
-      );
-    }
-    this.logger.debug(
-      `Credencial encontrada para userId="${userId}", cloudId="${cred.cloudId}".`,
-    );
 
-    // 2) Verificar e renovar token se necessário
-    const now = Date.now();
-    const expiresAtTime = cred.expiresAt.getTime();
-    const msLeft = expiresAtTime - now;
-    this.logger.debug(`Token expira em ${msLeft} ms para userId="${userId}".`);
-    if (msLeft < this.REFRESH_BUFFER_MS) {
-      this.logger.log(
-        `Token próximo da expiração (faltam ${msLeft} ms). Renovando antes da busca...`,
-      );
-      try {
-        const { newAccessToken, newRefreshToken, newExpiresIn } =
-          await this.authService.refreshAccessToken(userId);
+    const jiraBaseUrl = this.configService.get<string>('JIRA_BASE_URL');
+    const username = this.configService.get<string>('JIRA_USERNAME');
+    const apiToken = this.configService.get<string>('JIRA_API_TOKEN');
+    const auth = Buffer.from(`${username}:${apiToken}`).toString('base64');
 
-        cred.accessToken = newAccessToken;
-        cred.refreshToken = newRefreshToken;
-        cred.expiresAt = new Date(now + newExpiresIn * 1000);
-        this.logger.log(
-          `Token renovado no fetchAndProcessIssues para userId="${userId}".`,
-        );
-      } catch (error) {
-        this.logger.error(
-          `Falha ao renovar token no fetchAndProcessIssues para userId="${userId}": ${error.message}`,
-        );
-      }
-    }
-
-    // 3) Decide qual JQL usar: recebido ou padrão
     const jqlToUse = jql || this.DEFAULT_JQL;
     this.logger.log(`Usando JQL="${jqlToUse}" para userId="${userId}".`);
     const encodedJql = encodeURIComponent(jqlToUse);
 
     // 4) Monta a URL final de consulta ao Jira
-    const apiUrl = `https://api.atlassian.com/ex/jira/${cred.cloudId}/rest/api/3/search?jql=${encodedJql}`;
+    const apiUrl = `${jiraBaseUrl}/rest/api/3/search?jql=${encodedJql}`;
     this.logger.log(`Realizando GET em ${apiUrl}.`);
 
     // 5) Executar a requisição GET para a API Jira
@@ -243,7 +153,7 @@ export class JiraQueueMonitorService {
       response = await firstValueFrom(
         this.httpService.get(apiUrl, {
           headers: {
-            Authorization: `Bearer ${cred.accessToken}`,
+            Authorization: `Basic ${auth}`,
             Accept: 'application/json',
           },
         }),
@@ -275,7 +185,7 @@ export class JiraQueueMonitorService {
     });
 
     for (const issue of openIssues) {
-      await this.performPostActions(issue.key, cred.accessToken, cred.cloudId);
+      await this.performPostActions(issue.key);
     }
 
     return result;

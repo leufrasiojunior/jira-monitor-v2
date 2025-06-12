@@ -1,66 +1,6 @@
 {
   "openapi": "3.0.0",
   "paths": {
-    "/jira/auth/install": {
-      "get": {
-        "description": "Gera um state para proteção CSRF, define userId na sessão e redireciona o navegador para a URL de autorização do Jira.",
-        "operationId": "JiraAuthController_install",
-        "parameters": [],
-        "responses": {
-          "302": {
-            "description": "Redireciona o navegador para o Jira para autenticação/consentimento."
-          },
-          "500": {
-            "description": "Erro interno (por exemplo, falha ao montar a URL de autorização)."
-          }
-        },
-        "summary": "Inicia o fluxo OAuth 2.0 (3LO) do Jira",
-        "tags": [
-          "Auth"
-        ]
-      }
-    },
-    "/oauth/callback": {
-      "get": {
-        "description": "Recebe query params `code` e `state` do Jira, valida o state contra a sessão e troca o código por tokens. Persiste os tokens no banco.",
-        "operationId": "OauthCallbackController_callback",
-        "parameters": [
-          {
-            "name": "code",
-            "required": true,
-            "in": "query",
-            "description": "Código de autorização retornado pelo Jira",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "state",
-            "required": true,
-            "in": "query",
-            "description": "State enviado anteriormente para prevenção de CSRF",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Autorização concluída com sucesso; retorna cloudId e expiresIn."
-          },
-          "400": {
-            "description": "Parâmetros ausentes ou inválidos (ex.: state não confere, code ausente)."
-          },
-          "500": {
-            "description": "Erro interno durante a troca de tokens ou persistência."
-          }
-        },
-        "summary": "Callback do OAuth 2.0 (Jira)",
-        "tags": [
-          "Auth"
-        ]
-      }
-    },
     "/jira/monitor/fetch": {
       "get": {
         "description": "Consulta o Jira usando o JQL informado (ou o padrão do projeto OMNIJS), filtra, agrupa e retorna resumo das issues.",
@@ -108,39 +48,11 @@
           "Jira Monitor"
         ]
       }
-    },
-    "/jira/monitor/refresh-token": {
-      "get": {
-        "description": "Invoca o método que verifica o token e renova se estiver quase expirado. Retorna mensagem de sucesso ou informa que não era necessário renovar.",
-        "operationId": "JiraMonitorController_refreshTokenManually",
-        "parameters": [],
-        "responses": {
-          "200": {
-            "description": "Token renovado com sucesso ou já estava válido.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "example": {
-                    "message": "Token renovado ou já estava válido."
-                  }
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Erro interno ao tentar renovar o token."
-          }
-        },
-        "summary": "Forçar renovação manual do token do Jira",
-        "tags": [
-          "Jira Monitor"
-        ]
-      }
     }
   },
   "info": {
     "title": "Jira Monitor API",
-    "description": "API para monitorar filas do Jira via OAuth 2.0 (3LO)",
+    "description": "API para monitorar filas do Jira via autenticacao basica",
     "version": "1.0.0",
     "contact": {}
   },

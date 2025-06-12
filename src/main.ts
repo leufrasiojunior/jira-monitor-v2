@@ -32,12 +32,6 @@ async function bootstrap() {
     `SESSION_SECRET = ${configService.get<string>('SESSION_SECRET') ? '***' : '(padrão usado)'}`,
   );
   logger.debug(
-    `JIRA_CLIENT_ID = ${configService.get<string>('JIRA_CLIENT_ID') ? '***' : '(não definido)'}`,
-  );
-  logger.debug(
-    `JIRA_REDIRECT_URI = ${configService.get<string>('JIRA_REDIRECT_URI') ? configService.get<string>('JIRA_REDIRECT_URI') : '(não definido)'}`,
-  );
-  logger.debug(
     `JIRA_BASE_URL = ${configService.get<string>('JIRA_BASE_URL') ? configService.get<string>('JIRA_BASE_URL') : '(não definido)'}`,
   );
 
@@ -45,7 +39,8 @@ async function bootstrap() {
   logger.log('Configurando express-session...');
   app.use(
     session({
-      secret: configService.get<string>('SESSION_SECRET') || 'default_secret_key',
+      secret:
+        configService.get<string>('SESSION_SECRET') || 'default_secret_key',
       resave: false,
       saveUninitialized: false,
       cookie: { secure: false },
@@ -60,7 +55,9 @@ async function bootstrap() {
   logger.log('Configurando Swagger...');
   const config = new DocumentBuilder()
     .setTitle('Jira Monitor API')
-    .setDescription('API para monitorar filas do Jira via OAuth 2.0 (3LO)')
+    .setDescription(
+      'API para monitorar filas do Jira via autentica\u00e7\u00e3o b\u00e1sica',
+    )
     .setVersion('1.0.0')
     // .addBearerAuth(...)  // Se você for usar autenticação via Bearer dentro do Swagger
     .build();

@@ -89,47 +89,4 @@ export class JiraMonitorController {
       );
     }
   }
-
-  /**
-   * GET /jira/monitor/refresh-token
-   * Força a renovação do token do Jira para userId="default".
-   * Se o token não estiver perto de expirar, não altera nada.
-   */
-  @ApiOperation({
-    summary: 'Forçar renovação manual do token do Jira',
-    description:
-      'Invoca o método que verifica o token e renova se estiver quase expirado. Retorna mensagem de sucesso ou informa que não era necessário renovar.',
-  })
-  @ApiOkResponse({
-    description: 'Token renovado com sucesso ou já estava válido.',
-    schema: {
-      example: { message: 'Token renovado ou já estava válido.' },
-    },
-  })
-  @ApiResponse({
-    status: 500,
-    description: 'Erro interno ao tentar renovar o token.',
-  })
-  @Get('refresh-token')
-  async refreshTokenManually(): Promise<{ message: string }> {
-    const userId = 'default';
-    this.logger.log(
-      `Requisição GET /jira/monitor/refresh-token - userId="${userId}"`,
-    ); // ▶️ log de entrada
-    try {
-      // Chama o método que checa e renova o token se necessário
-      await this.jiraMonitorService.checkAndRefreshToken();
-      this.logger.log(
-        `refreshTokenManually concluído para userId="${userId}".`,
-      ); // ▶️ log de sucesso
-      return { message: 'Token renovado ou já estava válido.' };
-    } catch (error) {
-      this.logger.error(
-        `Falha ao renovar token manualmente para userId="${userId}": ${error.message}`,
-      ); // ▶️ log de erro
-      throw new InternalServerErrorException(
-        `Falha ao renovar token manualmente: ${error.message}`,
-      );
-    }
-  }
 }

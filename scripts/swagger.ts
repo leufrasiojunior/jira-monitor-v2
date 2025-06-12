@@ -34,7 +34,7 @@ async function generateSwaggerJson() {
   // 3) Monta a configuração do Swagger, igual ao que está no main.ts
   const config = new DocumentBuilder()
     .setTitle('Jira Monitor API')
-    .setDescription('API para monitorar filas do Jira via OAuth 2.0 (3LO)')
+    .setDescription('API para monitorar filas do Jira via autenticacao basica')
     .setVersion('1.0.0')
     .build();
 
