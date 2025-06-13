@@ -55,6 +55,31 @@ export class JiraQueueMonitorService {
     private readonly processIssuesUseCase: ProcessIssuesUseCase, // UseCase para processamento de issues
   ) {}
 
+  /** Recupera a base URL da API do Jira das variáveis de ambiente. */
+  private getApiBaseUrl(): string {
+    const apiBase = this.configService.get<string>('JIRA_API_BASE_URL');
+    if (!apiBase) {
+      this.logger.error('Variável JIRA_API_BASE_URL não definida');
+      throw new InternalServerErrorException(
+        'Configuração ausente: JIRA_API_BASE_URL',
+      );
+    }
+    this.logger.debug(`Usando JIRA_API_BASE_URL=${apiBase}`);
+    return apiBase;
+  }
+
+  /** Gera o header Authorization com credenciais básicas. */
+  private getBasicAuthHeader(): string {
+    const email = this.configService.get<string>('JIRA_USERNAME');
+    const token = this.configService.get<string>('JIRA_API_TOKEN');
+    if (!email || !token) {
+      this.logger.error('JIRA_USERNAME ou JIRA_API_TOKEN não definidos');
+      throw new InternalServerErrorException('Credenciais Basic Auth ausentes');
+    }
+    const encoded = Buffer.from(`${email}:${token}`).toString('base64');
+    return `Basic ${encoded}`;
+  }
+
   /**
    * performPostActions
    * ------------------
@@ -68,31 +93,16 @@ export class JiraQueueMonitorService {
    */
   async performPostActions(issueKey: string, cloudId: string): Promise<void> {
     // 1) Obter URL base da instância Jira Cloud
-    const jiraBase = this.configService.get<string>('JIRA_API_BASE_URL');
-    const cloudID = this.configService.get<string>('JIRA_CLOUD_ID');
+    const jiraBase = this.getApiBaseUrl();
 
-    if (!jiraBase) {
-      this.logger.error('Variável JIRA_API_BASE_URL não definida');
-      throw new InternalServerErrorException(
-        'Configuração ausente: JIRA_API_BASE_URL',
-      );
-    }
-    this.logger.debug(`Usando JIRA_API_BASE_URL=${jiraBase}`);
-
-    // 2) Montar Basic Auth a partir de e-mail e token de API
-    const email = this.configService.get<string>('JIRA_USERNAME');
-    const apiToken = this.configService.get<string>('JIRA_API_TOKEN');
-    if (!email || !apiToken) {
-      this.logger.error('JIRA_USERNAME ou JIRA_API_TOKEN não definidos');
-      throw new InternalServerErrorException('Credenciais Basic Auth ausentes');
-    }
-    const basicAuth = Buffer.from(`${email}:${apiToken}`).toString('base64');
+    // 2) Cabeçalho de autenticação
+    const authHeader = this.getBasicAuthHeader();
 
     // 3) Definir URL e headers para as chamadas
-    const issueUrl = `${jiraBase}/ex/jira/${cloudID}/rest/api/3/issue/${issueKey}`;
+    const issueUrl = `${jiraBase}/ex/jira/${cloudId}/rest/api/3/issue/${issueKey}`;
 
     const headers = {
-      Authorization: `Basic ${basicAuth}`,
+      Authorization: authHeader,
       Accept: 'application/json',
       'Content-Type': 'application/json',
     };
@@ -207,14 +217,7 @@ export class JiraQueueMonitorService {
     const cloudId = cred.cloudId;
 
     // 2) Montar URL de Search
-    const apiBase = this.configService.get<string>('JIRA_API_BASE_URL');
-    if (!apiBase) {
-      this.logger.error('JIRA_API_BASE_URL não definida');
-      throw new InternalServerErrorException(
-        'Configuração ausente: JIRA_API_BASE_URL',
-      );
-    }
-    this.logger.debug(`Usando JIRA_API_BASE_URL=${apiBase}`);
+    const apiBase = this.getApiBaseUrl();
 
     const jqlToUse = jql || this.DEFAULT_JQL;
     const encodedJql = encodeURIComponent(jqlToUse);
@@ -222,20 +225,14 @@ export class JiraQueueMonitorService {
     this.logger.log(`GET ${apiUrl}`);
 
     // 3) Executar GET com Basic Auth
-    const email = this.configService.get<string>('JIRA_USERNAME');
-    const token = this.configService.get<string>('JIRA_API_TOKEN');
-    if (!email || !token) {
-      this.logger.error('JIRA_EMAIL ou JIRA_API_TOKEN não definidos');
-      throw new InternalServerErrorException('Credenciais Basic Auth ausentes');
-    }
-    const basicAuth = Buffer.from(`${email}:${token}`).toString('base64');
+    const authHeader = this.getBasicAuthHeader();
 
     let response;
     try {
       response = await firstValueFrom(
         this.httpService.get(apiUrl, {
           headers: {
-            Authorization: `Basic ${basicAuth}`,
+            Authorization: authHeader,
             Accept: 'application/json',
           },
         }),
