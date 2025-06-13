@@ -35,7 +35,7 @@ import {
 } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
-import { Cron, CronExpression } from '@nestjs/schedule';
+import { Cron, CronExpression, SchedulerRegistry } from '@nestjs/schedule';
 
 import { JiraCredentialRepository } from '@infra/repositories/jira/jira-credential.repository';
 import { ProcessIssuesUseCase } from '@app/usecases/jira/process-issues.usecase';
@@ -53,6 +53,7 @@ export class JiraQueueMonitorService {
     private readonly jiraCredRepo: JiraCredentialRepository, // Repositório para obter cloudId
     private readonly configService: ConfigService, // Acesso a variáveis de ambiente
     private readonly processIssuesUseCase: ProcessIssuesUseCase, // UseCase para processamento de issues
+    private readonly schedulerRegistry: SchedulerRegistry, // Controle dos crons
   ) {}
 
   /** Recupera a base URL da API do Jira das variáveis de ambiente. */
@@ -179,7 +180,7 @@ export class JiraQueueMonitorService {
    *   - Buscar e processar issues
    *   - Executar ações automáticas em issues abertas
    */
-  @Cron(CronExpression.EVERY_MINUTE)
+  @Cron(CronExpression.EVERY_MINUTE, { name: 'jira-fetch-cron' })
   async handleInterval() {
     const userId = 'default';
     this.logger.log(
@@ -256,5 +257,23 @@ export class JiraQueueMonitorService {
     }
 
     return result;
+  }
+
+  /** Inicia o cron agendado manualmente */
+  startCron(): void {
+    const job = this.schedulerRegistry.getCronJob('jira-fetch-cron');
+    if (!job.isActive) {
+      job.start();
+      this.logger.log('Cron jira-fetch-cron iniciado manualmente');
+    }
+  }
+
+  /** Interrompe a execução do cron agendado */
+  stopCron(): void {
+    const job = this.schedulerRegistry.getCronJob('jira-fetch-cron');
+    if (job.isActive) {
+      job.stop();
+      this.logger.log('Cron jira-fetch-cron parado manualmente');
+    }
   }
 }

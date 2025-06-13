@@ -5,6 +5,7 @@ import { HttpModule } from '@nestjs/axios';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ScheduleModule } from '@nestjs/schedule';
 import { JiraMonitorController } from '@adapters/controllers/jira/jira-monitor.controller';
+import { JiraCronController } from '@adapters/controllers/jira/jira-cron.controller';
 import { AuthService } from '@app/services/auth/auth.service';
 import { JiraQueueMonitorService } from '@app/services/queue-monitor/jira-queue-monitor.service';
 import { ProcessIssuesUseCase } from '@app/usecases/jira/process-issues.usecase';
@@ -22,9 +23,7 @@ import { JiraCredentialRepository } from '@infra/repositories/jira/jira-credenti
     // 3) Habilita o ScheduleModule para que decoradores como @Interval funcionem
     ScheduleModule.forRoot(),
   ],
-  controllers: [
-    JiraMonitorController, // <-- adiciona o controller aqui
-  ],
+  controllers: [JiraMonitorController, JiraCronController],
   providers: [
     // 4) Serviços e repositórios
     JiraCredentialRepository, // Repositório de credenciais
